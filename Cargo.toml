@@ -1,0 +1,43 @@
+[package]
+name = "ingress-tls"
+version = "2025.11.29"
+edition = "2024"
+description = "Kubernetes AdmissionControl webhook to validate or mutate Ingress to ensure it contains TLS setup"
+license = "None"
+repository = "https://github.com/Magicloud/ingress-tls"
+keywords = ["Kubernetes", "Ingress", "TLS"]
+categories = ["Kubernetes"]
+readme = "README.md"
+
+[lints.clippy]
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+# opt-level = "z"
+opt-level = 3
+panic = "abort"
+
+[dependencies]
+mimalloc = { version = "*" }
+eyre = { version = "*" }
+color-eyre = { version = "*" }
+tracing-error = { version = "*" }
+clap = { version = "*", features = ["derive"] }
+tracing = { version = "*" }
+tracing-subscriber = { version = "*", features = ["env-filter"] }
+log = { version = "*" }
+logcall = { version = "*" }
+smol = { version = "*" }
+blocking = { version = "*" }
+async-compat = { version = "*" }
+k8s-openapi = { version = "*", features = ["earliest"] }
+kube = { version = "*", features = ["admission"] }
+serde = { version = "*", features = ["derive"] }
+serde_json = { version = "*" }
+json-patch = { version = "*" }
+actix-web = { version = "*", features = ["rustls-0_23"] }
+rustls = { version = "*" }
+aws-lc-rs = { version = "1.14.1" }
+inotify = { version = "*" }
