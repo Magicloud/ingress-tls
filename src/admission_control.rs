@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, str::FromStr};
 
 use eyre::eyre;
 use json_patch::{AddOperation, Patch, PatchOperation, ReplaceOperation, jsonptr::PointerBuf};
+use just_string::JustString;
 use k8s_openapi::api::networking::v1::{Ingress, IngressSpec, IngressTLS};
 use kube::{
     api::DynamicObject,
@@ -13,8 +14,9 @@ use tracing::instrument;
 use crate::{
     cli::Cli,
     helpers::{
-        Either, INGRESS_KIND, NGINX_FORCE_SSL_REDIRECT, SupportedIngressClass,
-        TRAEFIK_MIDDLEWARE_ANNOTATION, dynamic_object2ingress, get_default_ingressclass,
+        CLUSTER_ISSUER, INGRESS_KIND, ISSUER, ISSUER_GROUP, ISSUER_KIND, Issuer,
+        NGINX_FORCE_SSL_REDIRECT, SupportedIngressClass, TRAEFIK_MIDDLEWARE_ANNOTATION,
+        dynamic_object2ingress,
     },
 };
 
@@ -58,21 +60,19 @@ pub async fn mutate_ingress(
             ret.allowed = true;
             ret
         } else {
-            match if let Some(ref ic) = spec.ingress_class_name {
-                Ok(ic.clone())
-            } else {
-                get_default_ingressclass()
-                    .await
-                    .and_then(|x| x.ok_or_else(|| eyre!("No default IngressClass found")))
-            }
-            .and_then(|ic| SupportedIngressClass::from_str(&ic))
-            {
-                Ok(ic) => actual_mutating(spec, request, ingress, conf, ic),
-                Err(e) => {
-                    let ret = AdmissionResponse::from(request);
-                    ret.deny(format!("{e:?}"))
-                }
-            }
+            // DefaultIngressClass webhook runs first.
+            // Hence here, we should always get `spec.ingressClassName`.
+            spec.ingress_class_name
+                .as_ref()
+                .ok_or_else(|| eyre!("spec.ingressClassName should be there"))
+                .and_then(|ic| SupportedIngressClass::from_str(ic))
+                .map_or_else(
+                    |e| {
+                        let ret = AdmissionResponse::from(request);
+                        ret.deny(format!("{e:?}"))
+                    },
+                    |ic| actual_mutating(spec, request, ingress, conf, ic),
+                )
         }
     } else {
         // matched admission control rules, but not a valid Ingress?
@@ -118,18 +118,29 @@ fn actual_mutating(
     annotation_path.push_back("annotations");
     let original_annotations = ingress.metadata.annotations.as_ref().map(|x| {
         x.iter()
-            .map(|(k, v)| (Either::A(k), Either::A(v)))
+            .map(|(k, v)| (JustString::RefString(k), JustString::RefString(v)))
             .collect::<BTreeMap<_, _>>()
     });
     let no_annotations = original_annotations.is_none();
     let mut annotations = original_annotations.unwrap_or_default();
-    annotations.append(
-        &mut conf
-            .cert_manager_annotations
-            .iter()
-            .map(|(k, v)| (Either::A(k), Either::A(v)))
-            .collect::<BTreeMap<_, _>>(),
-    );
+
+    if let Some(ref x) = conf.cma {
+        if let Some(ref group) = x.group {
+            annotations.insert(ISSUER_GROUP, JustString::RefString(group));
+        }
+        if let Some(ref kind) = x.kind {
+            annotations.insert(ISSUER_KIND, JustString::RefString(kind));
+        }
+        match x.issuer {
+            Issuer::Namespaced(ref i) => {
+                annotations.insert(ISSUER, JustString::RefString(i));
+            }
+            Issuer::Clustered(ref i) => {
+                annotations.insert(CLUSTER_ISSUER, JustString::RefString(i));
+            }
+        }
+    }
+
     let annotations = match ingress_class {
         SupportedIngressClass::Traefik => conf.traefik_ingress_redirect_resource_name.as_ref().map_or_else(
             || {
@@ -146,14 +157,14 @@ fn actual_mutating(
                 };
                 let a = format!("{ns}-{n}@kubernetescrd");
                 annotations
-                    .entry(Either::B(TRAEFIK_MIDDLEWARE_ANNOTATION))
-                    .and_modify(|v| *v = Either::B(format!("{v},{a}")))
-                    .or_insert(Either::B(a));
+                    .entry(TRAEFIK_MIDDLEWARE_ANNOTATION)
+                    .and_modify(|v| *v = JustString::String(format!("{v},{a}")))
+                    .or_insert(JustString::String(a));
                 Ok(annotations)
             },
         ),
         SupportedIngressClass::Nginx => {
-            annotations.insert(Either::B(NGINX_FORCE_SSL_REDIRECT), Either::B("true".to_owned()));
+            annotations.insert(NGINX_FORCE_SSL_REDIRECT, JustString::RefStr("true"));
             Ok(annotations)
         }
     };

@@ -23,7 +23,7 @@ pub struct TLSCertResolver {
 impl TLSCertResolver {
     #[instrument]
     #[logcall(err = "error")]
-    pub fn new(
+    pub async fn new(
         cert_file_path: &Path,
         key_file_path: &Path,
         provider: &CryptoProvider,
@@ -39,6 +39,7 @@ impl TLSCertResolver {
             )?))),
         };
         let the_field = self_.certified_key.clone();
+        // /tls/ca.crt => /tls/..data/ca.crt => /tls/..DATE/ca.crt
         let cert_fp = cert_file_path.to_path_buf();
         let key_fp = key_file_path.to_path_buf();
         let p = provider.clone();
@@ -60,15 +61,17 @@ impl TLSCertResolver {
         provider: &CryptoProvider,
     ) -> Result<()> {
         let mut inotify = Inotify::init()?;
-        inotify
-            .watches()
-            .add(cert_file_path, WatchMask::CREATE | WatchMask::MODIFY)?;
-        inotify
-            .watches()
-            .add(key_file_path, WatchMask::CREATE | WatchMask::MODIFY)?;
+        inotify.watches().add(
+            cert_file_path,
+            WatchMask::DONT_FOLLOW | WatchMask::CREATE | WatchMask::MODIFY,
+        )?;
+        inotify.watches().add(
+            key_file_path,
+            WatchMask::DONT_FOLLOW | WatchMask::CREATE | WatchMask::MODIFY,
+        )?;
 
         let mut both_flags = (false, false);
-        let mut buffer = [0; 8];
+        let mut buffer = [0; 4096];
         loop {
             let events = inotify.read_events_blocking(&mut buffer)?;
             for event in events {
@@ -82,6 +85,7 @@ impl TLSCertResolver {
             }
 
             if both_flags.0 && both_flags.1 {
+                tracing::info!("TLS cert renewed");
                 *the_field.write_arc_blocking() = CertifiedKey::from_der(
                     CertificateDer::pem_file_iter(cert_file_path)?
                         .flatten()

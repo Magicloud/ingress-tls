@@ -41,3 +41,4 @@ actix-web = { version = "*", features = ["rustls-0_23"] }
 rustls = { version = "*" }
 aws-lc-rs = { version = "1.14.1" }
 inotify = { version = "*" }
+just-string = { git = "https://github.com/Magicloud/just-string.git", branch = "dev" }

@@ -2,10 +2,12 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use clap::{
-    ArgAction, Parser,
+    Args, Parser,
     builder::{StringValueParser, TypedValueParser},
 };
 use eyre::eyre;
+
+use crate::helpers::Issuer;
 
 #[derive(Parser, Clone, Debug)]
 pub struct Cli {
@@ -18,14 +20,11 @@ pub struct Cli {
             .map_err(|e| eyre!("{e:?}")))
         }))]
     pub listen_address: (String, u16),
-    /// Annotation to be added to the Ingress
+    /// Cert Manager annotation to be added to the Ingress
     /// In format `NAME:VALUE`
-    #[arg(short('a'), long, action = ArgAction::Append,
-        value_parser = StringValueParser::new().try_map(|s| {
-            s.split_once(':').map(|(a, b)| (a.to_owned(), b.to_owned()))
-            .ok_or(eyre!("Invalid format of annotation"))
-        }))]
-    pub cert_manager_annotations: Vec<(String, String)>,
+    /// Required by mutating webhook.
+    #[command(flatten)]
+    pub cma: Option<CertManagerAnnotations>,
     /// Traefik Ingress middleware to redirect HTTP to HTTPS
     /// In format `NAME`. `NAMESPACE/NAME` if the Middleware is not in the same
     /// namespace with Ingress.
@@ -37,4 +36,23 @@ pub struct Cli {
     /// Webhook service TLS private key file path
     #[arg(short('k'), long)]
     pub tls_private_key_file_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct CertManagerAnnotations {
+    #[arg(long, value_parser = StringValueParser::new().try_map(|s| {
+            s.split_once(':').ok_or(eyre!("Invalid format of annotation"))
+            .and_then(|(a, b)| if a.to_lowercase() == "namespaced" {
+                Ok(Issuer::Namespaced(b.to_owned()))
+            }else if a.to_lowercase() == "clustered" {
+                Ok(Issuer::Clustered(b.to_owned()))
+            } else {
+                Err(eyre!("Invalid issuer type"))
+            })
+        }))]
+    pub issuer: Issuer,
+    #[arg(long)]
+    pub kind: Option<String>,
+    #[arg(long)]
+    pub group: Option<String>,
 }

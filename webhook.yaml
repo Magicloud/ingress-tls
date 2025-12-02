@@ -60,14 +60,14 @@ spec:
       automountServiceAccountToken: false
       containers:
       - name: ingress-tls
-        image: localhost:5000/ingress-tls:test16
+        image: localhost:5000/ingress-tls:test19
         args:
-          - -a
-          - cert-manager.io/issuer:step-issuer
-          - -a
-          - cert-manager.io/issuer-kind:StepClusterIssuer
-          - -a
-          - cert-manager.io/issuer-group:certmanager.step.sm
+          - --issuer
+          - namespaced:step-issuer
+          - --kind
+          - StepClusterIssuer
+          - --group
+          - certmanager.step.sm
           - -t
           - test/https-redirect
           - -c
@@ -83,8 +83,8 @@ spec:
         env:
         - name: RUST_LOG
           value: DEBUG
-      securityContext:
-        fsGroup: 1000
+      # securityContext:
+      #   fsGroup: 1000
       volumes:
         - name: tls
           csi:
@@ -96,6 +96,8 @@ spec:
               csi.cert-manager.io/issuer-group: certmanager.step.sm
               csi.cert-manager.io/dns-names: ingress-tls.test.svc,ingress-tls.test.svc.cluster.local
               csi.cert-manager.io/duration: 24h
+              csi.cert-manager.io/renew-before: 1h
+              csi.cert-manager.io/fs-group: "1000"
 ---
 apiVersion: v1
 kind: Service

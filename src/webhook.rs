@@ -31,7 +31,8 @@ impl Cli {
             &self.tls_certificate_file_path,
             &self.tls_private_key_file_path,
             rustls::crypto::CryptoProvider::get_default().expect("Provider did not initialize"),
-        )?;
+        )
+        .await?;
 
         let addr = self.listen_address.clone();
 
