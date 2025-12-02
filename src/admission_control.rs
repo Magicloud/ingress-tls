@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, str::FromStr};
 
 use eyre::eyre;
 use json_patch::{AddOperation, Patch, PatchOperation, ReplaceOperation, jsonptr::PointerBuf};
@@ -8,15 +8,15 @@ use kube::{
     core::admission::{AdmissionRequest, AdmissionResponse},
 };
 use logcall::logcall;
-use smol::lock::OnceCell;
 use tracing::instrument;
 
 use crate::{
     cli::Cli,
-    helpers::{Either, INGRESS_KIND, dynamic_object2ingress},
+    helpers::{
+        Either, INGRESS_KIND, NGINX_FORCE_SSL_REDIRECT, SupportedIngressClass,
+        TRAEFIK_MIDDLEWARE_ANNOTATION, dynamic_object2ingress, get_default_ingressclass,
+    },
 };
-
-pub static TRAEFIK_MIDDLEWARE_ANNOTATION: OnceCell<String> = OnceCell::new();
 
 #[instrument]
 #[logcall]
@@ -41,7 +41,10 @@ pub fn validate_ingress(request: &AdmissionRequest<DynamicObject>) -> AdmissionR
 
 #[instrument]
 #[logcall]
-pub fn mutate_ingress(request: &AdmissionRequest<DynamicObject>, conf: &Cli) -> AdmissionResponse {
+pub async fn mutate_ingress(
+    request: &AdmissionRequest<DynamicObject>,
+    conf: &Cli,
+) -> AdmissionResponse {
     if request.kind == *INGRESS_KIND.get().expect("INGRESS_KIND not initialized")
         && let Some(ref ingress_obj) = request.object
         && let Ok(mut ingress) = dynamic_object2ingress(ingress_obj.clone())
@@ -55,7 +58,21 @@ pub fn mutate_ingress(request: &AdmissionRequest<DynamicObject>, conf: &Cli) -> 
             ret.allowed = true;
             ret
         } else {
-            actual_mutating(spec, request, ingress, conf)
+            match if let Some(ref ic) = spec.ingress_class_name {
+                Ok(ic.clone())
+            } else {
+                get_default_ingressclass()
+                    .await
+                    .and_then(|x| x.ok_or_else(|| eyre!("No default IngressClass found")))
+            }
+            .and_then(|ic| SupportedIngressClass::from_str(&ic))
+            {
+                Ok(ic) => actual_mutating(spec, request, ingress, conf, ic),
+                Err(e) => {
+                    let ret = AdmissionResponse::from(request);
+                    ret.deny(format!("{e:?}"))
+                }
+            }
         }
     } else {
         // matched admission control rules, but not a valid Ingress?
@@ -70,6 +87,7 @@ fn actual_mutating(
     request: &AdmissionRequest<DynamicObject>,
     ingress: Ingress,
     conf: &Cli,
+    ingress_class: SupportedIngressClass,
 ) -> AdmissionResponse {
     // /spec/tls
     let mut tls_path = PointerBuf::root();
@@ -100,7 +118,7 @@ fn actual_mutating(
     annotation_path.push_back("annotations");
     let original_annotations = ingress.metadata.annotations.as_ref().map(|x| {
         x.iter()
-            .map(|(k, v)| (k, Either::A(v)))
+            .map(|(k, v)| (Either::A(k), Either::A(v)))
             .collect::<BTreeMap<_, _>>()
     });
     let no_annotations = original_annotations.is_none();
@@ -109,18 +127,38 @@ fn actual_mutating(
         &mut conf
             .cert_manager_annotations
             .iter()
-            .map(|(k, v)| (k, Either::A(v)))
+            .map(|(k, v)| (Either::A(k), Either::A(v)))
             .collect::<BTreeMap<_, _>>(),
     );
-    annotations
-        .entry(
-            TRAEFIK_MIDDLEWARE_ANNOTATION
-                .get()
-                .expect("TRAEFIK_MIDDLEWARE_ANNOTATION is not initialized"),
-        )
-        .and_modify(|v| *v = Either::B(format!("{v},{}", conf.ingress_redirect_resource_name)))
-        .or_insert(Either::A(&conf.ingress_redirect_resource_name));
-    let annotations = serde_json::to_value(annotations).map_err(|e| eyre!("{e:?}"));
+    let annotations = match ingress_class {
+        SupportedIngressClass::Traefik => conf.traefik_ingress_redirect_resource_name.as_ref().map_or_else(
+            || {
+                Err(eyre!(
+                    "Did not provide Traefik redirect middleware while the Ingress Class is Traefik"
+                ))
+            },
+            |value| {
+                let (ns, n) = if let Some((ns, n)) = value.split_once('/') {
+                    (ns.to_owned(), n.to_owned())
+                } else {
+                    let ns = ingress.metadata.namespace.unwrap_or_else(||"default".to_owned());
+                    (ns, value.clone())
+                };
+                let a = format!("{ns}-{n}@kubernetescrd");
+                annotations
+                    .entry(Either::B(TRAEFIK_MIDDLEWARE_ANNOTATION))
+                    .and_modify(|v| *v = Either::B(format!("{v},{a}")))
+                    .or_insert(Either::B(a));
+                Ok(annotations)
+            },
+        ),
+        SupportedIngressClass::Nginx => {
+            annotations.insert(Either::B(NGINX_FORCE_SSL_REDIRECT), Either::B("true".to_owned()));
+            Ok(annotations)
+        }
+    };
+    let annotations = annotations
+        .and_then(|annotations| serde_json::to_value(annotations).map_err(|e| eyre!("{e:?}")));
 
     // It is time like this that I wonder why try_blocks is still nightly
     match tls.and_then(|tls| {

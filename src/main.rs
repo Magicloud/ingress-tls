@@ -22,7 +22,7 @@ use kube::api::GroupVersionKind;
 use mimalloc::MiMalloc;
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::{admission_control::TRAEFIK_MIDDLEWARE_ANNOTATION, cli::Cli, helpers::INGRESS_KIND};
+use crate::{cli::Cli, helpers::INGRESS_KIND};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -49,10 +49,6 @@ async fn real_main() -> Result<()> {
         })
         .await
         .expect("Cannot init INGRESS_KIND");
-    TRAEFIK_MIDDLEWARE_ANNOTATION
-        .set("traefik.ingress.kubernetes.io/router.middlewares".to_owned())
-        .await
-        .expect("Cannot init TRAEFIK_MIDDLEWARE_ANNOTATION");
 
     let cli = Cli::parse();
 

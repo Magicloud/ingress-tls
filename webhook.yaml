@@ -3,6 +3,34 @@ kind: Namespace
 metadata:
   name: test
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: get-default-ingressclass
+rules:
+- apiGroups: [""]
+  resources: ["ingressclasses"]
+  verbs: ["get"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: get-default-ingressclass
+  namespace: test
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: get-default-ingressclass
+subjects:
+- kind: ServiceAccount
+  name: get-default-ingressclass
+  namespace: test
+roleRef:
+  kind: ClusterRole
+  name: get-default-ingressclass
+  apiGroup: rbac.authorization.k8s.io
+---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
@@ -28,9 +56,11 @@ spec:
       labels:
         app: ingress-tls
     spec:
+      serviceAccountName: get-default-ingressclass
+      automountServiceAccountToken: false
       containers:
       - name: ingress-tls
-        image: localhost:5000/ingress-tls:test14
+        image: localhost:5000/ingress-tls:test16
         args:
           - -a
           - cert-manager.io/issuer:step-issuer
@@ -38,8 +68,8 @@ spec:
           - cert-manager.io/issuer-kind:StepClusterIssuer
           - -a
           - cert-manager.io/issuer-group:certmanager.step.sm
-          - -i
-          - test-https-redirect@kubernetescrd
+          - -t
+          - test/https-redirect
           - -c
           - /tls/tls.crt
           - -k

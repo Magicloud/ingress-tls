@@ -27,9 +27,10 @@ pub struct Cli {
         }))]
     pub cert_manager_annotations: Vec<(String, String)>,
     /// Traefik Ingress middleware to redirect HTTP to HTTPS
-    /// In format `NAMESPACE-NAME@kubernetescrd`
+    /// In format `NAME`. `NAMESPACE/NAME` if the Middleware is not in the same
+    /// namespace with Ingress.
     #[arg(short, long)]
-    pub ingress_redirect_resource_name: String,
+    pub traefik_ingress_redirect_resource_name: Option<String>,
     /// Webhook service TLS certificate file path
     #[arg(short('c'), long)]
     pub tls_certificate_file_path: PathBuf,

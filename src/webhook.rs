@@ -90,10 +90,13 @@ async fn post_ingress_mutate(
 ) -> Json<AdmissionReview<DynamicObject>> {
     let json = admission_review.into_inner();
     let ret = match serde_json::from_value::<AdmissionReview<DynamicObject>>(json) {
-        Ok(ar) => ar.try_into().as_ref().map_or_else(
-            |_| AdmissionResponse::invalid("No request got"),
-            |req| mutate_ingress(req, conf.get_ref()),
-        ),
+        Ok(ar) => match ar.try_into() {
+            Ok(req) => mutate_ingress(&req, conf.get_ref()).await,
+            Err(e) => {
+                tracing::error!("{e:?}");
+                AdmissionResponse::invalid("No request got")
+            }
+        },
         Err(e) => AdmissionResponse::invalid(format!("{e:?}")),
     };
     Json(ret.into_review())

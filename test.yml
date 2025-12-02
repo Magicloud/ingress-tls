@@ -44,8 +44,8 @@ metadata:
     # cert-manager.io/issuer: step-issuer
     # cert-manager.io/issuer-kind: StepClusterIssuer
     # cert-manager.io/issuer-group: certmanager.step.sm
-    traefik.ingress.kubernetes.io/router.middlewares: test-https-redirect@kubernetescrd
 spec:
+  # ingressClassName: nginx
   rules:
   - host: test.magicloud.lan
     http:
