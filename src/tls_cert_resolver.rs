@@ -2,7 +2,6 @@ use std::{path::Path, sync::Arc};
 
 use eyre::Result;
 use inotify::{Inotify, WatchMask};
-use logcall::logcall;
 use rustls::{
     crypto::CryptoProvider,
     pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
@@ -22,7 +21,6 @@ pub struct TLSCertResolver {
 }
 impl TLSCertResolver {
     #[instrument]
-    #[logcall(err = "error")]
     pub async fn new(
         cert_file_path: &Path,
         key_file_path: &Path,
@@ -53,7 +51,6 @@ impl TLSCertResolver {
     }
 
     #[instrument]
-    #[logcall(err = "error")]
     fn watch(
         the_field: &Arc<RwLock<Arc<CertifiedKey>>>,
         cert_file_path: &Path,
@@ -101,7 +98,6 @@ impl TLSCertResolver {
 }
 impl ResolvesServerCert for TLSCertResolver {
     #[instrument]
-    #[logcall]
     fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         Some(self.certified_key.read_arc_blocking().clone())
     }

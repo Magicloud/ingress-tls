@@ -1,8 +1,8 @@
 [package]
 name = "ingress-tls"
-version = "2025.11.29"
+version = "2025.12.25"
 edition = "2024"
-description = "Kubernetes AdmissionControl webhook to validate or mutate Ingress to ensure it contains TLS setup"
+description = "Kubernetes AdmissionControl webhook to validate or mutate Ingress/Gateway to ensure it contains TLS setup"
 license = "None"
 repository = "https://github.com/Magicloud/ingress-tls"
 keywords = ["Kubernetes", "Ingress", "TLS"]
@@ -23,22 +23,26 @@ panic = "abort"
 mimalloc = { version = "*" }
 eyre = { version = "*" }
 color-eyre = { version = "*" }
-tracing-error = { version = "*" }
 clap = { version = "*", features = ["derive"] }
 tracing = { version = "*" }
+tracing-error = { version = "*" }
 tracing-subscriber = { version = "*", features = ["env-filter"] }
-log = { version = "*" }
-logcall = { version = "*" }
+# log = { version = "*" }
+# logcall = { version = "*" }
+futures = { version = "*" }
 smol = { version = "*" }
 blocking = { version = "*" }
 async-compat = { version = "*" }
 k8s-openapi = { version = "*", features = ["earliest"] }
 kube = { version = "*", features = ["admission"] }
+gateway-api = { version = "*" }
 serde = { version = "*", features = ["derive"] }
 serde_json = { version = "*" }
+serde_yaml = { version = "*" }
 json-patch = { version = "*" }
 actix-web = { version = "*", features = ["rustls-0_23"] }
 rustls = { version = "*" }
 aws-lc-rs = { version = "1.14.1" }
 inotify = { version = "*" }
-just-string = { git = "https://github.com/Magicloud/just-string.git", branch = "dev" }
+just-string = { version = "*" }
+mea = { version = "*" }

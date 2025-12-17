@@ -1,63 +1,133 @@
-# apiVersion: apps/v1
-# kind: Deployment
+# ---
+# apiVersion: networking.k8s.io/v1
+# kind: Ingress
 # metadata:
-#   name: myjob
+#   name: test
 #   namespace: test
+#   annotations:
+#     external-dns.alpha.kubernetes.io/hostname: test.magicloud.lan.
+#     # cert-manager.io/issuer: step-issuer
+#     # cert-manager.io/issuer-kind: StepClusterIssuer
+#     # cert-manager.io/issuer-group: certmanager.step.sm
 # spec:
-#   selector:
-#     matchLabels:
-#       app: myjob
-#   replicas: 1
-#   template:
-#     metadata:
-#       labels:
-#         app: myjob
-#     spec:
-#       containers:
-#       - name: myjob
-#         image: localhost:5000/myip
-#         ports:
-#         - containerPort: 8888
-#           name: myjob
+#   # ingressClassName: nginx
+#   rules:
+#   - host: test.magicloud.lan
+#     http:
+#       paths:
+#       - path: /
+#         pathType: Prefix
+#         backend:
+#           service:
+#             name: myjob
+#             port:
+#               number: 80
+#   tls:
+#     - hosts:
+#        - test.magicloud.lan
+#       secretName: test-tls
 ---
-# apiVersion: v1
-# kind: Service
-# metadata:
-#   name: myjob
-#   namespace: test
-# spec:
-#   selector:
-#     app: myjob
-#   ports:
-#   - name: myjob
-#     protocol: TCP
-#     port: 80
-#     targetPort: myjob
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: test
+  name: whoami
+  namespace: test
+spec:
+  selector:
+    matchLabels:
+      app: whoami
+  template:
+    metadata:
+      labels:
+        app: whoami
+    spec:
+      containers:
+        - name: whoami
+          image: traefik/whoami
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whoami
+  namespace: test
+spec:
+  selector:
+    app: whoami
+  ports:
+    - port: 80
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: traefik
   namespace: test
   annotations:
-    external-dns.alpha.kubernetes.io/hostname: test.magicloud.lan.
-    # cert-manager.io/issuer: step-issuer
-    # cert-manager.io/issuer-kind: StepClusterIssuer
-    # cert-manager.io/issuer-group: certmanager.step.sm
+    cert-manager.io/issuer: step-issuer
+    cert-manager.io/issuer-kind: StepClusterIssuer
+    cert-manager.io/issuer-group: certmanager.step.sm
+    external-dns.alpha.kubernetes.io/hostname: whoami.magicloud.lan
 spec:
-  # ingressClassName: nginx
+  gatewayClassName: traefik
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 8000
+      allowedRoutes:
+        namespaces:
+          from: Same 
+    - name: https
+      protocol: HTTPS
+      port: 8443
+      hostname: whoami.magicloud.lan
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: traefik-gateway-tls
+            namespace: default
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: whoami-http
+  namespace: test
+spec:
+  parentRefs:
+    - name: traefik
+      sectionName: http
+      kind: Gateway
   rules:
-  - host: test.magicloud.lan
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: myjob
-            port:
-              number: 80
-  # tls:
-  #   - hosts:
-  #      - test.magicloud.lan
-  #     secretName: test-tls
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: whoami
+          namespace: default
+          port: 80
+    #  - filters:
+    #      - type: RequestRedirect
+    #        requestRedirect:
+    #          scheme: https
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: whoami-https
+  namespace: test
+spec:
+  parentRefs:
+    - name: traefik
+      sectionName: https
+      kind: Gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: whoami
+          namespace: default
+          port: 80
