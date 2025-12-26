@@ -19,6 +19,8 @@ pub static INGRESS_KIND: OnceCell<GroupVersionKind> = OnceCell::new();
 pub static GATEWAY_KINDS: OnceCell<[GroupVersionKind; 4]> = OnceCell::new();
 pub static HTTPROUTE_KINDS: OnceCell<[GroupVersionKind; 4]> = OnceCell::new();
 pub static DEFAULT_NAMESPACE: OnceCell<String> = OnceCell::new();
+pub static SKIP_VALIDATE_ANNOTATION: OnceCell<String> = OnceCell::new();
+pub static SKIP_MUTATE_ANNOTATION: OnceCell<String> = OnceCell::new();
 
 pub const TRAEFIK_MIDDLEWARE_ANNOTATION: JustString<'_> =
     JustString::RefStr("traefik.ingress.kubernetes.io/router.middlewares");

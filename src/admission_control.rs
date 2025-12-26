@@ -28,6 +28,15 @@ pub fn validate_ingress(mut ret: AdmissionResponse, ingress: Ingress) -> Admissi
     {
         // The ingress already has TLS defined.
         ret.allowed = true;
+    } else if ingress
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a_s| SKIP_VALIDATE_ANNOTATION.get().and_then(|a| a_s.get(a)))
+        .is_some_and(|v| v == "true")
+    {
+        // TODO: Record the skipping event?
+        ret.allowed = true;
     } else {
         ret = ret.deny("There is no TLS defined in this Ingress");
     }
@@ -47,6 +56,18 @@ pub fn validate_ingress(mut ret: AdmissionResponse, ingress: Ingress) -> Admissi
 // If there is no redirect http route after all, not so bad.
 #[instrument]
 pub async fn validate_gateway(mut ret: AdmissionResponse, gateway: Gateway) -> AdmissionResponse {
+    if gateway
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a_s| SKIP_VALIDATE_ANNOTATION.get().and_then(|a| a_s.get(a)))
+        .is_some_and(|v| v == "true")
+    {
+        // TODO: Record the skipping event?
+        ret.allowed = true;
+        return ret;
+    }
+
     tracing::debug!("Working on HTTPRoutes attached to HTTP listener");
     let empty_string = String::new();
     let http_listeners = gateway
@@ -192,6 +213,15 @@ pub async fn validate_httproute(
                 ret = ret.deny(format!("This HTTPRoute is not redirect, yet it works for non-HTTPS listeners in Gateways: {}", is_http.join(", ")));
             }
         }
+    } else if httproute
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a_s| SKIP_VALIDATE_ANNOTATION.get().and_then(|a| a_s.get(a)))
+        .is_some_and(|v| v == "true")
+    {
+        // TODO: Record the skipping event?
+        ret.allowed = true;
     } else {
         // Not for anything yet
         ret.allowed = true;

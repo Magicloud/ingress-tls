@@ -22,10 +22,8 @@ use kube::{Client, api::GroupVersionKind};
 use mimalloc::MiMalloc;
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::{
-    cli::Cli,
-    helpers::{DEFAULT_NAMESPACE, GATEWAY_KINDS, HTTPROUTE_KINDS, INGRESS_KIND},
-};
+#[allow(clippy::wildcard_imports)]
+use crate::{cli::Cli, helpers::*};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -85,6 +83,15 @@ async fn real_main() -> Result<()> {
         .set(gvks)
         .await
         .expect("Cannot init HTTPROUTE_KINDS");
+
+    SKIP_VALIDATE_ANNOTATION
+        .set("magicloud.github.io/skip_validate".to_string())
+        .await
+        .expect("Cannot init SKIP_VALIDATE_ANNOTATION");
+    SKIP_MUTATE_ANNOTATION
+        .set("magicloud.github.io/skip_mutate".to_string())
+        .await
+        .expect("Cannot init SKIP_MUTATE_ANNOTATION");
 
     let client = Client::try_default().await?;
     DEFAULT_NAMESPACE
