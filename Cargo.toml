@@ -1,6 +1,6 @@
 [package]
 name = "ingress-tls"
-version = "2025.12.25"
+version = "2026.1.3"
 edition = "2024"
 description = "Kubernetes AdmissionControl webhook to validate or mutate Ingress/Gateway to ensure it contains TLS setup"
 license = "None"
@@ -38,6 +38,7 @@ kube = { version = "*", features = ["admission"] }
 gateway-api = { version = "*" }
 serde = { version = "*", features = ["derive"] }
 serde_json = { version = "*" }
+serde_json_diff = { version = "*" }
 serde_yaml = { version = "*" }
 json-patch = { version = "*" }
 actix-web = { version = "*", features = ["rustls-0_23"] }

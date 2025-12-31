@@ -1,6 +1,6 @@
-use std::{collections::BTreeMap, str::FromStr};
+use std::str::FromStr;
 
-use eyre::{Result, eyre};
+use eyre::Result;
 use gateway_api::{
     gateways::{
         Gateway, GatewayListeners, GatewayListenersAllowedRoutesNamespaces,
@@ -11,9 +11,8 @@ use gateway_api::{
         HTTPRouteRulesFiltersType,
     },
 };
-use json_patch::{AddOperation, Patch, PatchOperation, ReplaceOperation, jsonptr::PointerBuf};
 use just_string::JustString;
-use k8s_openapi::api::networking::v1::{Ingress, IngressSpec, IngressTLS};
+use k8s_openapi::api::networking::v1::{Ingress, IngressTLS};
 use kube::core::admission::AdmissionResponse;
 use tracing::instrument;
 
@@ -32,7 +31,7 @@ pub fn validate_ingress(mut ret: AdmissionResponse, ingress: Ingress) -> Admissi
         .metadata
         .annotations
         .as_ref()
-        .and_then(|a_s| SKIP_VALIDATE_ANNOTATION.get().and_then(|a| a_s.get(a)))
+        .and_then(|a_s| a_s.get(SKIP_VALIDATE_ANNOTATION))
         .is_some_and(|v| v == "true")
     {
         // TODO: Record the skipping event?
@@ -51,6 +50,7 @@ pub fn validate_ingress(mut ret: AdmissionResponse, ingress: Ingress) -> Admissi
 
 // Based on this logic, how to mutate?
 // Gateway: Add HTTPS protocol listener. Need hostname and port.
+// If a httproute is refing the HTTP listener, there is nothing we can do, deny.
 // If http listener is 80, assume https is 443, otherwise fails.
 // When a non-redirect http route comes in, turn it into https section.
 // If there is no redirect http route after all, not so bad.
@@ -60,7 +60,7 @@ pub async fn validate_gateway(mut ret: AdmissionResponse, gateway: Gateway) -> A
         .metadata
         .annotations
         .as_ref()
-        .and_then(|a_s| SKIP_VALIDATE_ANNOTATION.get().and_then(|a| a_s.get(a)))
+        .and_then(|a_s| a_s.get(SKIP_VALIDATE_ANNOTATION))
         .is_some_and(|v| v == "true")
     {
         // TODO: Record the skipping event?
@@ -68,58 +68,32 @@ pub async fn validate_gateway(mut ret: AdmissionResponse, gateway: Gateway) -> A
         return ret;
     }
 
-    tracing::debug!("Working on HTTPRoutes attached to HTTP listener");
-    let empty_string = String::new();
-    let http_listeners = gateway
-        .spec
-        .listeners
-        .iter()
-        .filter(|l| l.protocol == "HTTP");
-    let def_ns = DEFAULT_NAMESPACE
-        .get()
-        .expect("Cannot get DEFAULT_NAMESPACE");
-    if let Some(ref gateway_name) = gateway.metadata.name {
-        for (i, listener) in http_listeners.enumerate() {
-            tracing::debug!("Working on listener {i}: {}", listener.name,);
-            let httproutes = get_httproutes_for_listener(
-                listener,
-                gateway_name,
-                gateway.metadata.namespace.as_ref().unwrap_or(def_ns),
-            )
-            .await;
-            match httproutes {
-                Ok(httproutes) => {
-                    tracing::debug!(
-                        "{} HTTPRoute-s are attached to this listener",
-                        httproutes.len()
-                    );
-                    let (_good, bad): (Vec<HTTPRoute>, Vec<HTTPRoute>) =
-                        httproutes.into_iter().partition(verify_httproute);
-                    let bad = bad
-                        .into_iter()
-                        .map(|h| {
-                            format!(
-                                "{}/{}",
-                                h.metadata.namespace.as_ref().unwrap_or(&empty_string),
-                                h.metadata.name.as_ref().unwrap_or(&empty_string)
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    if !bad.is_empty() {
-                        ret = ret.deny(format!(
-                            "There are {} non-redirect HTTPRoutes ref this Gateway, which are {}",
-                            bad.len(),
-                            bad.join(", "),
-                        ));
-                        return ret;
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("{e:?}");
-                    ret = ret.deny("Internal Error");
-                    return ret;
-                }
+    match get_bad_httproute_for_gateway(&gateway).await {
+        Ok(bad) => {
+            let empty_string = String::new();
+            let bad = bad
+                .into_iter()
+                .map(|h| {
+                    format!(
+                        "{}/{}",
+                        h.metadata.namespace.as_ref().unwrap_or(&empty_string),
+                        h.metadata.name.as_ref().unwrap_or(&empty_string)
+                    )
+                })
+                .collect::<Vec<_>>();
+            if !bad.is_empty() {
+                ret = ret.deny(format!(
+                    "There are {} non-redirect HTTPRoutes ref this Gateway, which are {}",
+                    bad.len(),
+                    bad.join(", "),
+                ));
+                return ret;
             }
+        }
+        Err(e) => {
+            tracing::error!("{e:?}");
+            ret = ret.deny("Internal Error");
+            return ret;
         }
     }
 
@@ -144,6 +118,40 @@ pub async fn validate_gateway(mut ret: AdmissionResponse, gateway: Gateway) -> A
     }
 
     ret
+}
+
+#[instrument]
+async fn get_bad_httproute_for_gateway(gateway: &Gateway) -> Result<Vec<HTTPRoute>> {
+    let http_listeners = gateway
+        .spec
+        .listeners
+        .iter()
+        .filter(|l| l.protocol == "HTTP");
+    let def_ns = DEFAULT_NAMESPACE
+        .get()
+        .expect("Cannot get DEFAULT_NAMESPACE");
+    if let Some(ref gateway_name) = gateway.metadata.name {
+        let mut ret = Vec::new();
+        for (i, listener) in http_listeners.enumerate() {
+            tracing::debug!("Working on listener {i}: {}", listener.name,);
+            let httproutes = get_httproutes_for_listener(
+                listener,
+                gateway_name,
+                gateway.metadata.namespace.as_ref().unwrap_or(def_ns),
+            )
+            .await?;
+            tracing::debug!(
+                "{} HTTPRoute-s are attached to this listener",
+                httproutes.len()
+            );
+            let (_good, mut bad): (Vec<HTTPRoute>, Vec<HTTPRoute>) =
+                httproutes.into_iter().partition(verify_httproute);
+            ret.append(&mut bad);
+        }
+        Ok(ret)
+    } else {
+        Ok(vec![])
+    }
 }
 
 #[instrument]
@@ -217,7 +225,7 @@ pub async fn validate_httproute(
         .metadata
         .annotations
         .as_ref()
-        .and_then(|a_s| SKIP_VALIDATE_ANNOTATION.get().and_then(|a| a_s.get(a)))
+        .and_then(|a_s| a_s.get(SKIP_VALIDATE_ANNOTATION))
         .is_some_and(|v| v == "true")
     {
         // TODO: Record the skipping event?
@@ -354,170 +362,210 @@ fn does_parentref_listener_equal(
 #[instrument]
 pub fn mutate_ingress(
     mut ret: AdmissionResponse,
-    mut ingress: Ingress,
+    ingress: &Ingress,
     conf: &Cli,
 ) -> AdmissionResponse {
-    if let Some(spec) = ingress.spec.take() {
-        if let Some(ref tls) = spec.tls
-            && !tls.is_empty()
-        {
-            // The ingress already has TLS defined.
-            ret.allowed = true;
-            ret
-        } else {
-            // DefaultIngressClass webhook runs first.
-            // Hence here, we should always get `spec.ingressClassName`.
-            match spec
-                .ingress_class_name
-                .as_ref()
-                .ok_or_else(|| eyre!("spec.ingressClassName should be there"))
-                .and_then(|ic| SupportedIngressClass::from_str(ic))
-            {
-                Ok(ic) => actual_mutating(ret, spec, ingress, conf, ic),
-                Err(e) => ret.deny(format!("{e:?}")),
+    if ingress
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a_s| a_s.get(&SKIP_MUTATE_ANNOTATION.to_string()))
+        .is_some_and(|v| v == "true")
+    {
+        // TODO: Record the skipping event?
+        ret.allowed = true;
+        return ret;
+    }
+    if let Some(ref _name) = ingress.metadata.name
+        && let Some(ref spec) = ingress.spec
+        && let Some(ref _icn) = spec.ingress_class_name
+        && let Some(ref rules) = spec.rules
+        && !rules.is_empty()
+    {
+        // Is this a good idea? Precheck necessary data here, following steps
+        // could just unwrap.
+    } else {
+        return AdmissionResponse::invalid("The Ingress does not contain enough information");
+    }
+
+    if ingress
+        .spec
+        .unwrap_ref()
+        .tls
+        .as_ref()
+        .is_none_or(|x| x.is_empty())
+    {
+        // DefaultIngressClass webhook runs first.
+        // Hence here, we should always get `spec.ingressClassName`.
+        match actual_mutating_ingress(ret.clone(), ingress, conf) {
+            Ok(r) => ret = r,
+            Err(e) => {
+                ret = ret.deny(format!("{e:?}"));
             }
         }
     } else {
-        // matched admission control rules, but not a valid Ingress?
-        AdmissionResponse::invalid("Cannot get valid Ingress with spec")
+        // The ingress already has TLS defined.
+        ret.allowed = true;
     }
+    ret
 }
 
+// Add cert manager annotation
+// Add redirect annotation
+// Add TLS field
 #[instrument]
-fn actual_mutating(
-    ret: AdmissionResponse,
-    spec: IngressSpec,
-    ingress: Ingress,
+fn actual_mutating_ingress(
+    mut ret: AdmissionResponse,
+    ingress: &Ingress,
     conf: &Cli,
-    ingress_class: SupportedIngressClass,
-) -> AdmissionResponse {
-    // /spec/tls
-    let mut tls_path = PointerBuf::root();
-    tls_path.push_back("spec");
-    tls_path.push_back("tls");
+) -> Result<AdmissionResponse> {
+    let mut target = ingress.clone();
 
-    let hosts = spec
+    let hosts: Vec<String> = ingress
+        .spec
+        .unwrap_ref()
         .rules
-        .map(|rules| rules.into_iter().filter_map(|rule| rule.host).collect());
-    if hosts.is_none() {
+        .unwrap_ref()
+        .iter()
+        .filter_map(|rule| rule.host.clone())
+        .collect();
+    if hosts.is_empty() {
         // If no hosts were specified in rules, leave the judgement to cert SAN.
         // But cert-manager rejects
-        return ret.deny("No hosts given");
+        return Ok(AdmissionResponse::invalid("No hosts given"));
     }
-    let secret_name = if let Some(name) = ingress.metadata.name
-        && !name.is_empty()
-    {
-        format!("{name}-tls")
-    } else {
-        // the name could be empty in some cases the request relies on K8S to generate the name
-        // TODO: random 7 chars
-        "empty-name-ingress-tls".to_owned()
-    };
+    // the name could be empty in some cases the request relies on K8S to generate the name
+    let secret_name = format!("{}-tls", ingress.metadata.name.unwrap_ref());
     let tls = vec![IngressTLS {
-        hosts,
+        hosts: Some(hosts),
         secret_name: Some(secret_name),
     }];
-    let tls = serde_json::to_value(tls).map_err(|e| eyre!("{e:?}"));
+    if let Some(spec) = target.spec.as_mut() {
+        spec.tls = Some(tls);
+    }
 
-    // /metadata/annotations
-    let mut annotation_path = PointerBuf::root();
-    annotation_path.push_back("metadata");
-    annotation_path.push_back("annotations");
-    let original_annotations = ingress.metadata.annotations.as_ref().map(|x| {
-        x.iter()
-            .map(|(k, v)| (JustString::RefString(k), JustString::RefString(v)))
-            .collect::<BTreeMap<_, _>>()
-    });
-    let no_annotations = original_annotations.is_none();
-    let mut annotations = original_annotations.unwrap_or_default();
-
+    let mut annotations = target.metadata.annotations.take().unwrap_or_default();
     if let Some(ref x) = conf.cma {
         if let Some(ref group) = x.group {
-            annotations.insert(ISSUER_GROUP, JustString::RefString(group));
+            annotations
+                .entry(ISSUER_GROUP.to_string())
+                .or_insert_with(|| group.clone());
         }
         if let Some(ref kind) = x.kind {
-            annotations.insert(ISSUER_KIND, JustString::RefString(kind));
+            annotations
+                .entry(ISSUER_KIND.to_string())
+                .or_insert_with(|| kind.clone());
         }
         match x.issuer {
             Issuer::Namespaced(ref i) => {
-                annotations.insert(ISSUER, JustString::RefString(i));
+                annotations
+                    .entry(ISSUER.to_string())
+                    .or_insert_with(|| i.clone());
             }
             Issuer::Clustered(ref i) => {
-                annotations.insert(CLUSTER_ISSUER, JustString::RefString(i));
+                annotations
+                    .entry(CLUSTER_ISSUER.to_string())
+                    .or_insert_with(|| i.clone());
             }
         }
     }
-
-    let annotations = match ingress_class {
-        SupportedIngressClass::Traefik => conf.traefik_ingress_redirect_resource_name.as_ref().map_or_else(
-            || {
-                Err(eyre!(
-                    "Did not provide Traefik redirect middleware while the Ingress Class is Traefik"
-                ))
-            },
-            |value| {
+    let ingress_class =
+        SupportedIngressClass::from_str(ingress.spec.unwrap_ref().ingress_class_name.unwrap_ref())?;
+    match ingress_class {
+        SupportedIngressClass::Traefik => {
+            if let Some(ref value) = conf.traefik_ingress_redirect_resource_name {
                 let (ns, n) = if let Some((ns, n)) = value.split_once('/') {
-                    (ns.to_owned(), n.to_owned())
+                    (JustString::RefStr(ns), JustString::RefStr(n))
                 } else {
-                    let ns = ingress.metadata.namespace.unwrap_or_else(||"default".to_owned());
-                    (ns, value.clone())
+                    // I wonder if this will ever happens
+                    let ns = ingress.metadata.namespace.as_ref().unwrap_or_else(|| {
+                        DEFAULT_NAMESPACE
+                            .get()
+                            .expect("DEFAULT_NAMESPACE not initialized")
+                    });
+                    (JustString::RefString(ns), JustString::RefString(value))
                 };
                 let a = format!("{ns}-{n}@kubernetescrd");
                 annotations
-                    .entry(TRAEFIK_MIDDLEWARE_ANNOTATION)
-                    .and_modify(|v| *v = JustString::String(format!("{v},{a}")))
-                    .or_insert(JustString::String(a));
-                Ok(annotations)
-            },
-        ),
-        SupportedIngressClass::Nginx => {
-            annotations.insert(NGINX_FORCE_SSL_REDIRECT, JustString::RefStr("true"));
-            Ok(annotations)
+                    .entry(TRAEFIK_MIDDLEWARE_ANNOTATION.to_string())
+                    .or_insert(a);
+            }
         }
-    };
-    let annotations = annotations
-        .and_then(|annotations| serde_json::to_value(annotations).map_err(|e| eyre!("{e:?}")));
-
-    // It is time like this that I wonder why try_blocks is still nightly
-    match tls.and_then(|tls| {
-        annotations.and_then(|annotations| {
-            ret.with_patch(Patch(vec![
-                if no_annotations {
-                    // Is there a better way to code this?
-                    PatchOperation::Add(AddOperation {
-                        path: annotation_path,
-                        value: annotations,
-                    })
-                } else {
-                    PatchOperation::Replace(ReplaceOperation {
-                        path: annotation_path,
-                        value: annotations,
-                    })
-                },
-                PatchOperation::Replace(ReplaceOperation {
-                    path: tls_path,
-                    value: tls,
-                }),
-            ]))
-            .map_err(|e| eyre!("{e:?}"))
-        })
-    }) {
-        Ok(ret) => ret,
-        Err(e) => AdmissionResponse::invalid(format!("Cannot generate patch for {e}")),
+        SupportedIngressClass::Nginx => {
+            annotations
+                .entry(NGINX_FORCE_SSL_REDIRECT.to_string())
+                .or_insert_with(|| "true".to_string());
+        }
     }
+    target.metadata.annotations = Some(annotations);
+
+    let i = serde_json::to_value(ingress)?;
+    let t = serde_json::to_value(target)?;
+    let p = json_patch::diff(&i, &t);
+    tracing::debug!("{p:?}");
+    ret = ret.clone().with_patch(p)?;
+    Ok(ret)
 }
 
 #[instrument]
-pub fn mutate_gateway(
+pub async fn mutate_gateway(
     mut ret: AdmissionResponse,
-    mut gateway: Gateway,
+    gateway: Gateway,
     conf: &Cli,
 ) -> AdmissionResponse {
+    if gateway
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a_s| a_s.get(SKIP_MUTATE_ANNOTATION))
+        .is_some_and(|v| v == "true")
+    {
+        // TODO: Record the skipping event?
+        ret.allowed = true;
+        return ret;
+    }
+
+    let mut target = gateway.clone();
+
+    // If there is already non-redirect HTTPRoute attached to the HTTP listener,
+    // Rework those listeners to HTTPS
+    // TODO:
+    let http_listeners = gateway
+        .spec
+        .listeners
+        .iter()
+        .filter(|l| l.protocol == "HTTP");
+    let def_ns = DEFAULT_NAMESPACE
+        .get()
+        .expect("Cannot get DEFAULT_NAMESPACE");
+    if let Some(ref gateway_name) = gateway.metadata.name {
+        for (i, listener) in http_listeners.enumerate() {
+            tracing::debug!("Working on listener {i}: {}", listener.name,);
+            let httproutes = get_httproutes_for_listener(
+                listener,
+                gateway_name,
+                gateway.metadata.namespace.as_ref().unwrap_or(def_ns),
+            )
+            .await
+            .unwrap();
+            tracing::debug!(
+                "{} HTTPRoute-s are attached to this listener",
+                httproutes.len()
+            );
+            let (_good, bad): (Vec<HTTPRoute>, Vec<HTTPRoute>) =
+                httproutes.into_iter().partition(verify_httproute);
+            if !bad.is_empty() {}
+        }
+    };
+
+    tracing::debug!("Check if there is no HTTPS listener");
     if let Some(listener) = gateway
         .spec
         .listeners
         .iter()
         .find(|l| l.protocol == "HTTPS")
+        // `HTTPS` without `tls` is invalid, won't be programmed.
+        // Hence it is reasonable not checking the following.
         && let Some(ref tls) = listener.tls
         && (tls.mode == Some(GatewayListenersTlsMode::Passthrough)
             || (tls.mode == Some(GatewayListenersTlsMode::Terminate)
@@ -527,10 +575,55 @@ pub fn mutate_gateway(
         // The gateway already has TLS defined.
         ret.allowed = true;
     } else {
-        ret = ret.deny("There is no TLS defined in this Ingress");
-        // adding HTTPS section with tls and cert-manager annotations
-        // is not enough.
+        // hostname and port are logically impossible to get.
+        // Use 443 for port, althought this breaks Traefik,
+        // which implementation is totally wrong.
+        // Guess hostname from ExternalDNS annotation.
+        let gn = gateway.metadata.name;
+        let gns = gateway.metadata.namespace.as_ref().unwrap_or(
+            DEFAULT_NAMESPACE
+                .get()
+                .expect("DEFAULT_NAMESPACE is not initialized"),
+        );
+        let hostname = gateway.metadata.annotations.and_then(|a_s| {
+            a_s.get("external-dns.alpha.kubernetes.io/hostname")
+                .map(|x| x.clone())
+        });
+        // gateway.spec.listeners.push(GatewayListeners {
+        //     allowed_routes: None,
+        //     hostname,
+        //     name: "https".to_string(),
+        //     port: 443,
+        //     protocol: "HTTPS".to_string(),
+        //     tls: Some(GatewayListenersTls {
+        //         certificate_refs: Some(vec![GatewayListenersTlsCertificateRefs {
+        //             group: None,
+        //             kind: None,
+        //             name: format!("{}-tls", gn.unwrap_or_default()),
+        //             namespace: Some(gns.clone()),
+        //         }]),
+        //         mode: Some(GatewayListenersTlsMode::Terminate),
+        //         options: None,
+        //     }),
+        // });
+        // ret.with_patch(Patch(vec![if no_annotations {
+        //     // Is there a better way to code this?
+        //     PatchOperation::Add(AddOperation {
+        //         path: annotation_path,
+        //         value: annotations,
+        //     })
+        // } else {
+        //     PatchOperation::Replace(ReplaceOperation {
+        //         path: annotation_path,
+        //         value: annotations,
+        //     })
+        // }]))
+        // .map_err(|e| eyre!("{e:?}"));
     }
 
     ret
+}
+
+pub fn mutate_httproute(mut ret: AdmissionResponse, mut httproute: HTTPRoute) -> AdmissionResponse {
+    todo!()
 }

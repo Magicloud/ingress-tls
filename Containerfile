@@ -17,7 +17,7 @@ ENV SCCACHE_S3_SERVER_SIDE_ENCRYPTION="false"
 ENV AWS_ACCESS_KEY_ID="sccache"
 ENV AWS_SECRET_ACCESS_KEY="sccache123"
 
-RUN cargo install --path . --target x86_64-unknown-linux-musl
+RUN cargo install --path . --target x86_64-unknown-linux-musl --debug
 
 
 FROM alpine:latest

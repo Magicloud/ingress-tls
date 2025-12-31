@@ -84,15 +84,6 @@ async fn real_main() -> Result<()> {
         .await
         .expect("Cannot init HTTPROUTE_KINDS");
 
-    SKIP_VALIDATE_ANNOTATION
-        .set("magicloud.github.io/skip_validate".to_string())
-        .await
-        .expect("Cannot init SKIP_VALIDATE_ANNOTATION");
-    SKIP_MUTATE_ANNOTATION
-        .set("magicloud.github.io/skip_mutate".to_string())
-        .await
-        .expect("Cannot init SKIP_MUTATE_ANNOTATION");
-
     let client = Client::try_default().await?;
     DEFAULT_NAMESPACE
         .set(client.default_namespace().to_string())

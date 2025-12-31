@@ -111,26 +111,33 @@ async fn post_mutate(
 ) -> Json<AdmissionReview<DynamicObject>> {
     let json = admission_review.into_inner();
     let ret = match serde_json::from_value::<AdmissionReview<DynamicObject>>(json) {
-        Ok(ar) => ar.try_into().map_or_else(
-            |e| {
+        Ok(ar) => match ar.try_into() {
+            Err(e) => {
                 tracing::error!("{e:?}");
                 AdmissionResponse::invalid("No request got")
-            },
-            |req| {
-                //mutate_ingress(&req, conf.get_ref()),
+            }
+            Ok(req) => {
+                //mutate_ingress(&req, conf.unwrap_ref()),
                 let mut ret = AdmissionResponse::from(&req);
                 if let Some(obj) = req.object {
                     if req.kind == *INGRESS_KIND.get().expect("INGRESS_KIND not initialized")
                         && let Ok(ingress) = dynamic_object2ingress(obj.clone())
                     {
-                        mutate_ingress(ret, ingress, conf.get_ref())
+                        mutate_ingress(ret, &ingress, &conf)
                     } else if GATEWAY_KINDS
                         .get()
                         .expect("GATEWAY_KINDs not initialized")
                         .contains(&req.kind)
-                        && let Ok(gateway) = dynamic_object2gateway(obj)
+                        && let Ok(gateway) = dynamic_object2gateway(obj.clone())
                     {
-                        mutate_gateway(ret, gateway, conf.get_ref())
+                        mutate_gateway(ret, gateway, &conf).await
+                    } else if HTTPROUTE_KINDS
+                        .get()
+                        .expect("HTTPROUTE_KINDs not initialized")
+                        .contains(&req.kind)
+                        && let Ok(httproute) = dynamic_object2httproute(obj)
+                    {
+                        mutate_httproute(ret, httproute)
                     } else {
                         ret = ret.deny("");
                         ret
@@ -139,8 +146,8 @@ async fn post_mutate(
                     ret = ret.deny("");
                     ret
                 }
-            },
-        ),
+            }
+        },
         Err(e) => AdmissionResponse::invalid(format!("{e:?}")),
     };
     Json(ret.into_review())

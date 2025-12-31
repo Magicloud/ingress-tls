@@ -19,17 +19,15 @@ pub static INGRESS_KIND: OnceCell<GroupVersionKind> = OnceCell::new();
 pub static GATEWAY_KINDS: OnceCell<[GroupVersionKind; 4]> = OnceCell::new();
 pub static HTTPROUTE_KINDS: OnceCell<[GroupVersionKind; 4]> = OnceCell::new();
 pub static DEFAULT_NAMESPACE: OnceCell<String> = OnceCell::new();
-pub static SKIP_VALIDATE_ANNOTATION: OnceCell<String> = OnceCell::new();
-pub static SKIP_MUTATE_ANNOTATION: OnceCell<String> = OnceCell::new();
 
-pub const TRAEFIK_MIDDLEWARE_ANNOTATION: JustString<'_> =
-    JustString::RefStr("traefik.ingress.kubernetes.io/router.middlewares");
-pub const NGINX_FORCE_SSL_REDIRECT: JustString<'_> =
-    JustString::RefStr("nginx.ingress.kubernetes.io/force-ssl-redirect");
-pub const ISSUER: JustString<'_> = JustString::RefStr("cert-manager.io/issuer");
-pub const CLUSTER_ISSUER: JustString<'_> = JustString::RefStr("cert-manager.io/cluster-issuer");
-pub const ISSUER_KIND: JustString<'_> = JustString::RefStr("cert-manager.io/issuer-kind");
-pub const ISSUER_GROUP: JustString<'_> = JustString::RefStr("cert-manager.io/issuer-group");
+pub const SKIP_VALIDATE_ANNOTATION: &str = "magicloud.github.io/skip_validate";
+pub const SKIP_MUTATE_ANNOTATION: &str = "magicloud.github.io/skip_mutate";
+pub const TRAEFIK_MIDDLEWARE_ANNOTATION: &str = "traefik.ingress.kubernetes.io/router.middlewares";
+pub const NGINX_FORCE_SSL_REDIRECT: &str = "nginx.ingress.kubernetes.io/force-ssl-redirect";
+pub const ISSUER: &str = "cert-manager.io/issuer";
+pub const CLUSTER_ISSUER: &str = "cert-manager.io/cluster-issuer";
+pub const ISSUER_KIND: &str = "cert-manager.io/issuer-kind";
+pub const ISSUER_GROUP: &str = "cert-manager.io/issuer-group";
 
 // Why this is not a Trait for all objects.
 pub fn dynamic_object2ingress(obj: DynamicObject) -> Result<Ingress> {
@@ -109,7 +107,6 @@ pub enum Issuer {
     Clustered(String),
 }
 
-// Maybe Result<Option<Gateway>>? kube client error and exist or not
 pub async fn get_gateway(namespace: &str, name: &str) -> Result<Option<Gateway>> {
     let client = Client::try_default().await?;
     let gateways: Api<Gateway> = Api::namespaced(client, namespace);
@@ -268,15 +265,11 @@ impl<T, E> AsyncResultExt<T, E> for Result<T, E> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        // let x = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        // println!("{x:?}");
-        let x = smol::block_on(async_compat::Compat::new(get_httproutes(&Namespaces::All)));
-        println!("{x:?}");
+pub trait OptionExt<T> {
+    fn unwrap_ref(&self) -> &T;
+}
+impl<T> OptionExt<T> for Option<T> {
+    fn unwrap_ref(&self) -> &T {
+        self.as_ref().unwrap()
     }
 }
