@@ -3,6 +3,7 @@
 use std::{fmt::Display, str::FromStr};
 
 use eyre::{Report, Result, eyre};
+use futures::future::BoxFuture;
 use gateway_api::{
     gateways::{Gateway, GatewayListenersAllowedRoutesNamespacesSelectorMatchExpressions},
     httproutes::HTTPRoute,
@@ -12,8 +13,10 @@ use k8s_openapi::api::{core::v1::Namespace, networking::v1::Ingress};
 use kube::{
     Api, Client,
     api::{DynamicObject, GroupVersionKind, ListParams},
+    core::admission::AdmissionResponse,
 };
 use mea::once::OnceCell;
+use serde::Serialize;
 
 pub static INGRESS_KIND: OnceCell<GroupVersionKind> = OnceCell::new();
 pub static GATEWAY_KINDS: OnceCell<[GroupVersionKind; 4]> = OnceCell::new();
@@ -273,3 +276,31 @@ impl<T> OptionExt<T> for Option<T> {
         self.as_ref().unwrap()
     }
 }
+
+pub trait ResultExt<T> {
+    fn extract(self) -> T;
+}
+impl<T> ResultExt<T> for Result<T, T> {
+    fn extract(self) -> T {
+        match self {
+            Ok(t) | Err(t) => t,
+        }
+    }
+}
+
+pub fn patch<T: Serialize>(src: &T, dst: &T, ret: AdmissionResponse) -> Result<AdmissionResponse> {
+    let s = serde_json::to_value(src)?;
+    let d = serde_json::to_value(dst)?;
+    let p = json_patch::diff(&s, &d);
+    let x = ret.with_patch(p)?;
+    Ok(x)
+}
+
+pub enum Status {
+    MoveOn,
+    Allowed,
+    Denied(String),
+    Invalid(String),
+}
+
+pub type AsyncClosure<'a, T> = Box<dyn Fn(T) -> BoxFuture<'a, Result<Status>>>;

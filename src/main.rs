@@ -10,9 +10,10 @@
 #![allow(clippy::multiple_crate_versions)]
 #![allow(clippy::wildcard_dependencies)]
 
-mod admission_control;
 mod cli;
+mod gateway;
 mod helpers;
+mod ingress;
 mod tls_cert_resolver;
 mod webhook;
 
