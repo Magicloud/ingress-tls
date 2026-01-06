@@ -18,7 +18,7 @@ pub fn validate_ingress(ingress: &Ingress) -> Status {
         {
             Ok(Status::MoveOn)
         } else {
-            Ok(Status::Denied("No TLS defined".to_string()))
+            Ok(Status::Denied(DenyReason::IngressNoTLS))
         }
     };
     let skip = || {
@@ -41,7 +41,7 @@ pub fn validate_ingress(ingress: &Ingress) -> Status {
         .try_fold(Status::MoveOn, |b, f| match b {
             Status::MoveOn => match f() {
                 Ok(x) => Ok(x),
-                Err(e) => Err(Status::Denied(format!("{e:?}"))),
+                Err(e) => Err(Status::Denied(DenyReason::InternalError(e))),
             },
             x => Err(x),
         })

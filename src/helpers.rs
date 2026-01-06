@@ -1,18 +1,21 @@
 #![allow(dead_code)]
 
-use std::{fmt::Display, str::FromStr};
+use std::{collections::HashMap, fmt::Display, str::FromStr};
 
 use eyre::{Report, Result, eyre};
 use futures::future::BoxFuture;
 use gateway_api::{
-    gateways::{Gateway, GatewayListenersAllowedRoutesNamespacesSelectorMatchExpressions},
+    gateways::{
+        Gateway, GatewayListeners, GatewayListenersAllowedRoutesNamespacesSelectorMatchExpressions,
+    },
     httproutes::HTTPRoute,
 };
+use itertools::Itertools;
 use just_string::JustString;
 use k8s_openapi::api::{core::v1::Namespace, networking::v1::Ingress};
 use kube::{
     Api, Client,
-    api::{DynamicObject, GroupVersionKind, ListParams},
+    api::{DynamicObject, GroupVersionKind, ListParams, ObjectMeta},
     core::admission::AdmissionResponse,
 };
 use mea::once::OnceCell;
@@ -296,11 +299,95 @@ pub fn patch<T: Serialize>(src: &T, dst: &T, ret: AdmissionResponse) -> Result<A
     Ok(x)
 }
 
+#[derive(PartialEq, Eq, Hash)]
+pub struct ListenerIdentifier {
+    name: String,
+    port: i32,
+}
+impl From<&GatewayListeners> for ListenerIdentifier {
+    fn from(value: &GatewayListeners) -> Self {
+        Self {
+            name: value.name.clone(),
+            port: value.port,
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Hash)]
+pub struct ObjectMetaIdentifier {
+    resource_version: Option<String>,
+    name: Option<String>,
+    namespace: Option<String>,
+}
+impl From<ObjectMeta> for ObjectMetaIdentifier {
+    fn from(value: ObjectMeta) -> Self {
+        Self {
+            resource_version: value.resource_version,
+            name: value.name,
+            namespace: value.namespace,
+        }
+    }
+}
+
 pub enum Status {
     MoveOn,
     Allowed,
-    Denied(String),
+    Denied(DenyReason),
     Invalid(String),
 }
 
+pub enum DenyReason {
+    InternalError(Report),
+    IngressNoTLS,
+    GatewayNoTLSListener,
+    GatewayNonRedirectHTTPRouteAttached(HashMap<ListenerIdentifier, Vec<HTTPRoute>>),
+    HTTPRouteNonRedirectAttachedToHTTPListener(
+        HashMap<ObjectMetaIdentifier, Vec<ListenerIdentifier>>,
+    ),
+}
+impl Display for DenyReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let def_ns = DEFAULT_NAMESPACE
+            .get()
+            .expect("Cannot get DEFAULT_NAMESPACE");
+        let empty_string = String::new();
+        match self {
+            Self::InternalError(report) => {
+                f.write_str(&format!("Internal Error occurred.\n{report:?}"))
+            }
+            Self::IngressNoTLS => f.write_str("The Ingress does not contain a TLS configuration."),
+            Self::GatewayNoTLSListener => {
+                f.write_str("The Gateway doe s not contain a TLS configuration.")
+            }
+            Self::GatewayNonRedirectHTTPRouteAttached(hash_map) => {
+                let httproutes = hash_map
+                    .values()
+                    .flatten()
+                    .unique_by(|x| (x.metadata.name.as_ref(), x.metadata.namespace.as_ref()))
+                    .collect::<Vec<_>>();
+                f.write_str(&format!(
+                "There are {} non-redirect HTTPRoutes (listed below) attaching to HTTP listeners of this Gateway.\n{}",
+                httproutes.len(),
+                httproutes.into_iter().map(|x| format!("{}/{}", x.metadata.namespace.as_ref().unwrap_or(def_ns), x.metadata.name.as_ref().unwrap_or(&empty_string))).join("\n")
+            ))
+            }
+            Self::HTTPRouteNonRedirectAttachedToHTTPListener(hash_map) => f.write_str(&format!(
+                "This non-redirect HTTPRoute is attaching to HTTP listeners of Gateways: {}",
+                hash_map
+                    .keys()
+                    .map(|x| format!(
+                        "{}/{}",
+                        x.namespace.as_ref().unwrap_or(def_ns),
+                        x.name.as_ref().unwrap_or(&empty_string)
+                    ))
+                    .join("\n")
+            )),
+        }
+    }
+}
+
 pub type AsyncClosure<'a, T> = Box<dyn Fn(T) -> BoxFuture<'a, Result<Status>>>;
+
+pub trait HasMetadata {
+    fn get_metadata(&self) -> ObjectMeta;
+}

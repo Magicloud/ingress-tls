@@ -1,7 +1,7 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use eyre::Result;
-use futures::{StreamExt, future::ready, stream};
+use futures::{StreamExt, stream};
 use gateway_api::{
     gateways::{
         Gateway, GatewayListeners, GatewayListenersAllowedRoutes,
@@ -46,26 +46,13 @@ pub async fn validate_gateway(gateway: Arc<Gateway>) -> Status {
         // non-redirect HTTPRoutes attached
         Box::new(|x| {
             Box::pin(async move {
-                let empty_string = String::new();
                 let bad = get_bad_httproute_for_gateway(&x).await?;
                 if bad.is_empty() {
                     Ok(Status::MoveOn)
                 } else {
-                    let bad = bad
-                        .into_iter()
-                        .map(|h| {
-                            format!(
-                                "{}/{}",
-                                h.metadata.namespace.as_ref().unwrap_or(&empty_string),
-                                h.metadata.name.as_ref().unwrap_or(&empty_string)
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    Ok(Status::Denied(format!(
-                        "There are {} non-redirect HTTPRoutes ref this Gateway, which are {}",
-                        bad.len(),
-                        bad.join(", "),
-                    ))) as Result<Status>
+                    Ok(Status::Denied(
+                        DenyReason::GatewayNonRedirectHTTPRouteAttached(bad),
+                    )) as Result<Status>
                 }
             })
         }),
@@ -83,9 +70,7 @@ pub async fn validate_gateway(gateway: Arc<Gateway>) -> Status {
                 {
                     Ok(Status::MoveOn) as Result<Status>
                 } else {
-                    Ok(Status::Denied(
-                        "There is no TLS defined in this Gateway".to_string(),
-                    ))
+                    Ok(Status::Denied(DenyReason::GatewayNoTLSListener))
                 }
             })
         }),
@@ -96,7 +81,7 @@ pub async fn validate_gateway(gateway: Arc<Gateway>) -> Status {
         let ret = match accum {
             Status::MoveOn => match check(x).await {
                 Ok(x) => Ok(x),
-                Err(e) => Err(Status::Denied(format!("{e:?}"))),
+                Err(e) => Err(Status::Denied(DenyReason::InternalError(e))),
             },
             x => Err(x),
         };
@@ -110,7 +95,9 @@ pub async fn validate_gateway(gateway: Arc<Gateway>) -> Status {
 }
 
 #[instrument]
-async fn get_bad_httproute_for_gateway(gateway: &Gateway) -> Result<Vec<HTTPRoute>> {
+async fn get_bad_httproute_for_gateway(
+    gateway: &Gateway,
+) -> Result<HashMap<ListenerIdentifier, Vec<HTTPRoute>>> {
     let http_listeners = gateway
         .spec
         .listeners
@@ -120,7 +107,7 @@ async fn get_bad_httproute_for_gateway(gateway: &Gateway) -> Result<Vec<HTTPRout
         .get()
         .expect("Cannot get DEFAULT_NAMESPACE");
     if let Some(ref gateway_name) = gateway.metadata.name {
-        let mut ret = Vec::new();
+        let mut ret = HashMap::new();
         for (i, listener) in http_listeners.enumerate() {
             tracing::debug!("Working on listener {i}: {}", listener.name,);
             let httproutes = get_httproutes_for_listener(
@@ -135,15 +122,17 @@ async fn get_bad_httproute_for_gateway(gateway: &Gateway) -> Result<Vec<HTTPRout
             );
             let bad = httproutes
                 .into_iter()
-                .filter(|x| !is_redirect_or_no_rule(x));
-            ret.extend(bad);
+                .filter(|x| !is_redirect_or_no_rule(x))
+                .collect();
+            ret.insert(listener.into(), bad);
         }
         Ok(ret)
     } else {
-        Ok(vec![])
+        Ok(HashMap::new())
     }
 }
 
+// rewrite httproute to attach to same gateway's https listener, find by hostname, if possible. Or if there is only one.
 #[instrument]
 pub async fn validate_httproute(httproute: Arc<HTTPRoute>) -> Status {
     let checks: Vec<AsyncClosure<'_, Arc<HTTPRoute>>> = vec![
@@ -185,34 +174,29 @@ pub async fn validate_httproute(httproute: Arc<HTTPRoute>) -> Status {
         // attached to http listener
         Box::new(|x| {
             Box::pin(async move {
-                let empty_string = String::new();
                 let def_ns = DEFAULT_NAMESPACE
                     .get()
                     .expect("Cannot get DEFAULT_NAMESPACE");
                 let parentrefs = x.spec.parent_refs.unwrap_ref();
                 let httproute_namespace = x.metadata.namespace.as_ref().unwrap_or(def_ns);
                 let result = stream::iter(parentrefs)
-                    .filter_map(|p| {
-                        find_gateway_of_http_listener_attached_to(p, httproute_namespace)
-                    })
-                    .map(|r| {
-                        r.map(|g| {
-                            format!(
-                                "{}/{}",
-                                g.metadata.namespace.as_ref().unwrap_or(def_ns),
-                                g.metadata.name.as_ref().unwrap_or(&empty_string)
-                            )
-                        })
+                    .filter_map(|p| async {
+                        filter_gateway_of_http_listener_attached_to(p, httproute_namespace)
+                            .await
+                            .transpose()
                     })
                     .collect::<Vec<_>>()
                     .await
                     .into_iter()
+                    .map(|r| r.map(|(g, lis)| (g.metadata.into(), lis)))
                     .collect::<Result<Vec<_>>>();
                 result.map(|gateways| {
                     if gateways.is_empty() {
                         Status::Allowed
                     } else {
-                        Status::Denied(format!("This non-redirect HTTPRoute is attached to HTTP listener in Gateway {}", gateways.join(",")))
+                        Status::Denied(DenyReason::HTTPRouteNonRedirectAttachedToHTTPListener(
+                            HashMap::from_iter(gateways),
+                        ))
                     }
                 })
             })
@@ -224,7 +208,7 @@ pub async fn validate_httproute(httproute: Arc<HTTPRoute>) -> Status {
         let ret = match accum {
             Status::MoveOn => match check(x).await {
                 Ok(x) => Ok(x),
-                Err(e) => Err(Status::Denied(format!("{e:?}"))),
+                Err(e) => Err(Status::Denied(DenyReason::InternalError(e))),
             },
             x => Err(x),
         };
@@ -238,34 +222,34 @@ pub async fn validate_httproute(httproute: Arc<HTTPRoute>) -> Status {
 }
 
 #[instrument]
-async fn find_gateway_of_http_listener_attached_to(
+async fn filter_gateway_of_http_listener_attached_to(
     p: &HTTPRouteParentRefs,
     httproute_namespace: &str,
-) -> Option<Result<Gateway>> {
+) -> Result<Option<(Gateway, Vec<ListenerIdentifier>)>> {
     let def_ns = DEFAULT_NAMESPACE
         .get()
         .expect("Cannot get DEFAULT_NAMESPACE");
     let empty_string = String::new();
-    if p.kind.as_ref()? == "Gateway" {
-        let gateway = get_gateway(p.namespace.as_ref().unwrap_or(def_ns), &p.name)
-            .await
-            .transpose()?;
-        gateway
-            .map(|g| {
-                let gn = g.metadata.name.as_ref().unwrap_or(&empty_string);
-                let gns = g.metadata.namespace.as_ref().unwrap_or(def_ns);
-                let listener = g.spec.listeners.iter().find(|listener| {
-                    does_parentref_listener_equal(p, listener, gn, gns, httproute_namespace)
-                })?;
-                if listener.protocol == "HTTP" {
-                    Some(g)
-                } else {
-                    None
-                }
-            })
-            .transpose()
+    if p.kind.as_ref().is_some_and(|x| x == "Gateway") {
+        let gateway = get_gateway(p.namespace.as_ref().unwrap_or(def_ns), &p.name).await?;
+        let ret = gateway.map(|g| {
+            let gn = g.metadata.name.as_ref().unwrap_or(&empty_string);
+            let gns = g.metadata.namespace.as_ref().unwrap_or(def_ns);
+            let lis = g
+                .spec
+                .listeners
+                .iter()
+                .filter(|listener| {
+                    listener.protocol == "HTTP"
+                        && does_parentref_listener_match(p, listener, gn, gns, httproute_namespace)
+                })
+                .map(|l| l.into())
+                .collect();
+            (g, lis)
+        });
+        Ok(ret)
     } else {
-        None
+        Ok(None)
     }
 }
 
@@ -335,6 +319,7 @@ async fn get_httproutes_for_listener(
                             .collect::<Vec<SelectorByLabel>>()
                     })
                     .unwrap_or_default();
+                // TODO: the result is intersection, not union.
                 let mut selectors = m;
                 selectors.append(&mut l);
                 let nss = filter_namespaces(&selectors).await?;
@@ -354,7 +339,7 @@ async fn get_httproutes_for_listener(
                 let hns = httproute.metadata.namespace.as_ref().unwrap_or(def_ns);
                 if let Some(ref parentrefs) = httproute.spec.parent_refs
                     && parentrefs.iter().all(|parentref| {
-                        does_parentref_listener_equal(
+                        does_parentref_listener_match(
                             parentref,
                             listener,
                             gateway_name,
@@ -376,7 +361,7 @@ async fn get_httproutes_for_listener(
     }
 }
 
-fn does_parentref_listener_equal(
+fn does_parentref_listener_match(
     p: &HTTPRouteParentRefs,
     l: &GatewayListeners,
     gn: &str,
@@ -393,11 +378,14 @@ fn does_parentref_listener_equal(
 
 // Gateway: Add HTTPS protocol listener. Need hostname and port.
 // If a httproute is refing the HTTP listener, rework the listener to HTTPS.
+// There would be two issues.
+// 1. There are already HTTPS listeners.
+// 2. There are redirect as well.
 // If http listener is 80(8000), assume https is 443(8443), otherwise fails.
 // When a non-redirect http route comes in, turn it into https section.
 // If there is no redirect http route after all, not so bad.
 // hostname and port are logically impossible to get.
-// Guess hostname from ExternalDNS annotation.
+// Guess hostname from ExternalDNS annotation. Or from http listener.
 #[instrument]
 pub async fn mutate_gateway(
     mut ret: AdmissionResponse,

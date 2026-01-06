@@ -105,7 +105,12 @@ async fn post_validate(admission_review: Json<Value>) -> Json<AdmissionReview<Dy
                             ret.allowed = true;
                             ret
                         }
-                        Status::Denied(msg) => ret.deny(msg),
+                        Status::Denied(msg) => {
+                            if let DenyReason::InternalError(ref report) = msg {
+                            tracing::warn!("{:?}", report);
+                            }
+                            ret.deny(msg.to_string())
+                        },
                         Status::Invalid(msg) => AdmissionResponse::invalid(msg),
                     }
                 }
@@ -129,7 +134,6 @@ async fn post_mutate(
                 AdmissionResponse::invalid("No request got")
             }
             Ok(req) => {
-                //mutate_ingress(&req, conf.unwrap_ref()),
                 let mut ret = AdmissionResponse::from(&req);
                 if let Some(obj) = req.object {
                     if req.kind == *INGRESS_KIND.get().expect("INGRESS_KIND not initialized")

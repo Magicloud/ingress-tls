@@ -26,34 +26,34 @@
 #        - test.magicloud.lan
 #       secretName: test-tls
 ---
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: whoami
-  namespace: test
-spec:
-  selector:
-    matchLabels:
-      app: whoami
-  template:
-    metadata:
-      labels:
-        app: whoami
-    spec:
-      containers:
-        - name: whoami
-          image: traefik/whoami
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: whoami
-  namespace: test
-spec:
-  selector:
-    app: whoami
-  ports:
-    - port: 80
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: whoami
+#   namespace: test
+# spec:
+#   selector:
+#     matchLabels:
+#       app: whoami
+#   template:
+#     metadata:
+#       labels:
+#         app: whoami
+#     spec:
+#       containers:
+#         - name: whoami
+#           image: traefik/whoami
+# ---
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: whoami
+#   namespace: test
+# spec:
+#   selector:
+#     app: whoami
+#   ports:
+#     - port: 80
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
