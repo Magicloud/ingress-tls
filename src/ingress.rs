@@ -1,9 +1,8 @@
-use std::str::FromStr;
+use std::{collections::BTreeMap, str::FromStr};
 
 use eyre::Result;
-use just_string::JustString;
+use itertools::Itertools;
 use k8s_openapi::api::networking::v1::{Ingress, IngressTLS};
-use kube::core::admission::AdmissionResponse;
 use tracing::instrument;
 
 #[allow(clippy::wildcard_imports)]
@@ -49,91 +48,68 @@ pub fn validate_ingress(ingress: &Ingress) -> Status {
 }
 
 #[instrument]
-pub fn mutate_ingress(
-    mut ret: AdmissionResponse,
-    ingress: &Ingress,
-    conf: &Cli,
-) -> AdmissionResponse {
-    if ingress
-        .metadata
-        .annotations
-        .as_ref()
-        .and_then(|a_s| a_s.get(&SKIP_MUTATE_ANNOTATION.to_string()))
-        .is_some_and(|v| v == "true")
-    {
-        // TODO: Record the skipping event?
-        ret.allowed = true;
-        return ret;
-    }
-    if let Some(ref _name) = ingress.metadata.name
-        && let Some(ref spec) = ingress.spec
-        && let Some(ref _icn) = spec.ingress_class_name
-        && let Some(ref rules) = spec.rules
-        && !rules.is_empty()
-    {
-        // Is this a good idea? Precheck necessary data here, following steps
-        // could just unwrap.
-    } else {
-        return AdmissionResponse::invalid("The Ingress does not contain enough information");
-    }
+pub fn mutate_ingress(ingress: &Ingress, conf: &Cli) -> Status {
+    match validate_ingress(ingress) {
+        Status::Allowed => Status::Allowed,
+        Status::Denied(deny_reason) => match deny_reason {
+            DenyReason::InternalError(ref _r) => Status::Denied(deny_reason),
+            DenyReason::IngressNoTLS => {
+                let edns_hostname = get_external_dns_hostname(ingress);
+                if let Some(ref name) = ingress.metadata.name
+                    && let Some(ref spec) = ingress.spec
+                    && let Some(ref icn) = spec.ingress_class_name
+                    && let icn = SupportedIngressClass::from_str(icn)
+                    && let Ok(ic) = icn
+                    && let Some(ref rules) = spec.rules
+                    && let hosts = rules
+                        .iter()
+                        .map(|x| x.host.as_ref())
+                        .collect::<Vec<_>>()
+                        .push_return(edns_hostname.as_ref())
+                        .into_iter()
+                        .flatten()
+                        .unique()
+                        .collect::<Vec<_>>()
+                    && !hosts.is_empty()
+                {
+                    let ns = ingress.metadata.namespace.as_ref().unwrap_or_else(|| {
+                        DEFAULT_NAMESPACE
+                            .get()
+                            .expect("DEFAULT_NAMESPACE not initialized")
+                    });
+                    let tls = vec![IngressTLS {
+                        hosts: Some(hosts.into_iter().cloned().collect()),
+                        secret_name: Some(format!("{name}-tls")),
+                    }];
+                    let mut target = ingress.clone();
+                    let mut annotations = target.metadata.annotations.take().unwrap_or_default();
+                    if let Some(s) = target.spec.as_mut() {
+                        s.tls = Some(tls);
+                    }
+                    patch_annotations(&mut annotations, &ic, ns, conf);
+                    target.metadata.annotations = Some(annotations);
 
-    if ingress
-        .spec
-        .unwrap_ref()
-        .tls
-        .as_ref()
-        .is_none_or(std::vec::Vec::is_empty)
-    {
-        // DefaultIngressClass webhook runs first.
-        // Hence here, we should always get `spec.ingressClassName`.
-        match actual_mutating_ingress(ret.clone(), ingress, conf) {
-            Ok(r) => ret = r,
-            Err(e) => {
-                ret = ret.deny(format!("{e:?}"));
+                    match patch(ingress, &target) {
+                        Ok(p) => Status::Patch(p),
+                        Err(e) => Status::Denied(DenyReason::InternalError(e)),
+                    }
+                } else {
+                    Status::Invalid("The Ingress does not contain enough information".to_string())
+                }
             }
-        }
-    } else {
-        // The ingress already has TLS defined.
-        ret.allowed = true;
+            _ => unimplemented!(),
+        },
+        _ => unimplemented!(),
     }
-    ret
 }
 
-// Add cert manager annotation
-// Add redirect annotation
-// Add TLS field
 #[instrument]
-fn actual_mutating_ingress(
-    ret: AdmissionResponse,
-    ingress: &Ingress,
+fn patch_annotations(
+    annotations: &mut BTreeMap<String, String>,
+    ic: &SupportedIngressClass,
+    ns: &str,
     conf: &Cli,
-) -> Result<AdmissionResponse> {
-    let mut target = ingress.clone();
-
-    let hosts: Vec<String> = ingress
-        .spec
-        .unwrap_ref()
-        .rules
-        .unwrap_ref()
-        .iter()
-        .filter_map(|rule| rule.host.clone())
-        .collect();
-    if hosts.is_empty() {
-        // If no hosts were specified in rules, leave the judgement to cert SAN.
-        // But cert-manager rejects
-        return Ok(AdmissionResponse::invalid("No hosts given"));
-    }
-    // the name could be empty in some cases the request relies on K8S to generate the name
-    let secret_name = format!("{}-tls", ingress.metadata.name.unwrap_ref());
-    let tls = vec![IngressTLS {
-        hosts: Some(hosts),
-        secret_name: Some(secret_name),
-    }];
-    if let Some(spec) = target.spec.as_mut() {
-        spec.tls = Some(tls);
-    }
-
-    let mut annotations = target.metadata.annotations.take().unwrap_or_default();
+) {
     if let Some(ref x) = conf.cma {
         if let Some(ref group) = x.group {
             annotations
@@ -158,22 +134,10 @@ fn actual_mutating_ingress(
             }
         }
     }
-    let ingress_class =
-        SupportedIngressClass::from_str(ingress.spec.unwrap_ref().ingress_class_name.unwrap_ref())?;
-    match ingress_class {
+    match ic {
         SupportedIngressClass::Traefik => {
             if let Some(ref value) = conf.traefik_ingress_redirect_resource_name {
-                let (ns, n) = if let Some((ns, n)) = value.split_once('/') {
-                    (JustString::RefStr(ns), JustString::RefStr(n))
-                } else {
-                    // I wonder if this will ever happens
-                    let ns = ingress.metadata.namespace.as_ref().unwrap_or_else(|| {
-                        DEFAULT_NAMESPACE
-                            .get()
-                            .expect("DEFAULT_NAMESPACE not initialized")
-                    });
-                    (JustString::RefString(ns), JustString::RefString(value))
-                };
+                let (ns, n) = value.split_once('/').unwrap_or((ns, value));
                 let a = format!("{ns}-{n}@kubernetescrd");
                 annotations
                     .entry(TRAEFIK_MIDDLEWARE_ANNOTATION.to_string())
@@ -186,7 +150,4 @@ fn actual_mutating_ingress(
                 .or_insert_with(|| "true".to_string());
         }
     }
-    target.metadata.annotations = Some(annotations);
-
-    patch(ingress, &target, ret)
 }

@@ -13,6 +13,7 @@
 mod cli;
 mod gateway;
 mod helpers;
+mod httproute;
 mod ingress;
 mod tls_cert_resolver;
 mod webhook;

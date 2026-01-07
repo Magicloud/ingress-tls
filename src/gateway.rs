@@ -1,17 +1,13 @@
 use std::{collections::HashMap, sync::Arc};
 
 use eyre::Result;
-use futures::{StreamExt, stream};
 use gateway_api::{
     gateways::{
         Gateway, GatewayListeners, GatewayListenersAllowedRoutes,
         GatewayListenersAllowedRoutesNamespaces, GatewayListenersAllowedRoutesNamespacesFrom,
         GatewayListenersTls, GatewayListenersTlsCertificateRefs, GatewayListenersTlsMode,
     },
-    httproutes::{
-        HTTPRoute, HTTPRouteParentRefs, HTTPRouteRulesFiltersRequestRedirectScheme,
-        HTTPRouteRulesFiltersType,
-    },
+    httproutes::{HTTPRoute, HTTPRouteParentRefs},
 };
 use just_string::JustString;
 use kube::core::admission::AdmissionResponse;
@@ -132,151 +128,6 @@ async fn get_bad_httproute_for_gateway(
     }
 }
 
-// rewrite httproute to attach to same gateway's https listener, find by hostname, if possible. Or if there is only one.
-#[instrument]
-pub async fn validate_httproute(httproute: Arc<HTTPRoute>) -> Status {
-    let checks: Vec<AsyncClosure<'_, Arc<HTTPRoute>>> = vec![
-        // skip
-        Box::new(|x| {
-            Box::pin(async move {
-                if x.metadata
-                    .annotations
-                    .as_ref()
-                    .and_then(|a_s| a_s.get(SKIP_VALIDATE_ANNOTATION))
-                    .is_some_and(|v| v == "true")
-                {
-                    Ok(Status::Allowed)
-                } else {
-                    Ok(Status::MoveOn)
-                }
-            })
-        }),
-        // redirect
-        Box::new(|x| {
-            Box::pin(async move {
-                if is_redirect_or_no_rule(&x) {
-                    Ok(Status::Allowed)
-                } else {
-                    Ok(Status::MoveOn)
-                }
-            })
-        }),
-        // no parents yet
-        Box::new(|x| {
-            Box::pin(async move {
-                if x.spec.parent_refs.is_none() {
-                    Ok(Status::Allowed)
-                } else {
-                    Ok(Status::MoveOn)
-                }
-            })
-        }),
-        // attached to http listener
-        Box::new(|x| {
-            Box::pin(async move {
-                let def_ns = DEFAULT_NAMESPACE
-                    .get()
-                    .expect("Cannot get DEFAULT_NAMESPACE");
-                let parentrefs = x.spec.parent_refs.unwrap_ref();
-                let httproute_namespace = x.metadata.namespace.as_ref().unwrap_or(def_ns);
-                let result = stream::iter(parentrefs)
-                    .filter_map(|p| async {
-                        filter_gateway_of_http_listener_attached_to(p, httproute_namespace)
-                            .await
-                            .transpose()
-                    })
-                    .collect::<Vec<_>>()
-                    .await
-                    .into_iter()
-                    .map(|r| r.map(|(g, lis)| (g.metadata.into(), lis)))
-                    .collect::<Result<Vec<_>>>();
-                result.map(|gateways| {
-                    if gateways.is_empty() {
-                        Status::Allowed
-                    } else {
-                        Status::Denied(DenyReason::HTTPRouteNonRedirectAttachedToHTTPListener(
-                            HashMap::from_iter(gateways),
-                        ))
-                    }
-                })
-            })
-        }),
-    ];
-    let mut accum = Status::MoveOn;
-    for check in checks {
-        let x = httproute.clone();
-        let ret = match accum {
-            Status::MoveOn => match check(x).await {
-                Ok(x) => Ok(x),
-                Err(e) => Err(Status::Denied(DenyReason::InternalError(e))),
-            },
-            x => Err(x),
-        };
-        let is_err = ret.is_err();
-        accum = ret.extract();
-        if is_err {
-            break;
-        }
-    }
-    accum
-}
-
-#[instrument]
-async fn filter_gateway_of_http_listener_attached_to(
-    p: &HTTPRouteParentRefs,
-    httproute_namespace: &str,
-) -> Result<Option<(Gateway, Vec<ListenerIdentifier>)>> {
-    let def_ns = DEFAULT_NAMESPACE
-        .get()
-        .expect("Cannot get DEFAULT_NAMESPACE");
-    let empty_string = String::new();
-    if p.kind.as_ref().is_some_and(|x| x == "Gateway") {
-        let gateway = get_gateway(p.namespace.as_ref().unwrap_or(def_ns), &p.name).await?;
-        let ret = gateway.map(|g| {
-            let gn = g.metadata.name.as_ref().unwrap_or(&empty_string);
-            let gns = g.metadata.namespace.as_ref().unwrap_or(def_ns);
-            let lis = g
-                .spec
-                .listeners
-                .iter()
-                .filter(|listener| {
-                    listener.protocol == "HTTP"
-                        && does_parentref_listener_match(p, listener, gn, gns, httproute_namespace)
-                })
-                .map(|l| l.into())
-                .collect();
-            (g, lis)
-        });
-        Ok(ret)
-    } else {
-        Ok(None)
-    }
-}
-
-#[instrument]
-fn is_redirect_or_no_rule(httproute: &HTTPRoute) -> bool {
-    if let Some(ref rules) = httproute.spec.rules
-        && rules.len() == 1
-        && let Some(rule) = rules.first()
-        && rule.backend_refs.is_none()
-        && let Some(ref filters) = rule.filters
-        && filters.len() == 1
-        && let Some(filter) = filters.first()
-        && filter.r#type == HTTPRouteRulesFiltersType::RequestRedirect
-        && let Some(ref rr) = filter.request_redirect
-        && rr.scheme == Some(HTTPRouteRulesFiltersRequestRedirectScheme::Https)
-    {
-        // HTTP route with only redirect
-        true
-    } else if httproute.spec.rules.is_none() || httproute.spec.rules == Some(Vec::new()) {
-        // Not for anything yet
-        true
-    } else {
-        tracing::warn!("{}", serde_yaml::to_string(httproute).unwrap());
-        false
-    }
-}
-
 #[instrument]
 async fn get_httproutes_for_listener(
     listener: &GatewayListeners,
@@ -359,21 +210,6 @@ async fn get_httproutes_for_listener(
     } else {
         Ok(vec![])
     }
-}
-
-fn does_parentref_listener_match(
-    p: &HTTPRouteParentRefs,
-    l: &GatewayListeners,
-    gn: &str,
-    gns: &str,
-    hns: &str,
-) -> bool {
-    let hns = hns.to_string();
-    p.kind == Some("Gateway".to_string())
-        && p.name == gn
-        && p.namespace.as_ref().unwrap_or(&hns) == gns
-        && p.section_name.as_ref().is_none_or(|psn| psn == &l.name)
-        && p.port.is_none_or(|pp| pp == l.port)
 }
 
 // Gateway: Add HTTPS protocol listener. Need hostname and port.
@@ -537,13 +373,6 @@ pub async fn mutate_gateway(
     }
 
     ret
-}
-
-pub fn mutate_httproute(
-    mut ret: AdmissionResponse,
-    mut httproute: &HTTPRoute,
-) -> AdmissionResponse {
-    todo!()
 }
 
 fn patch<T: Serialize>(src: &T, dst: &T, ret: AdmissionResponse) -> Result<AdmissionResponse> {

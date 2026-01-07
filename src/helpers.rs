@@ -8,18 +8,22 @@ use gateway_api::{
     gateways::{
         Gateway, GatewayListeners, GatewayListenersAllowedRoutesNamespacesSelectorMatchExpressions,
     },
-    httproutes::HTTPRoute,
+    httproutes::{
+        HTTPRoute, HTTPRouteParentRefs, HTTPRouteRulesFiltersRequestRedirectScheme,
+        HTTPRouteRulesFiltersType,
+    },
 };
 use itertools::Itertools;
+use json_patch::Patch;
 use just_string::JustString;
 use k8s_openapi::api::{core::v1::Namespace, networking::v1::Ingress};
 use kube::{
     Api, Client,
     api::{DynamicObject, GroupVersionKind, ListParams, ObjectMeta},
-    core::admission::AdmissionResponse,
 };
 use mea::once::OnceCell;
 use serde::Serialize;
+use tracing::instrument;
 
 pub static INGRESS_KIND: OnceCell<GroupVersionKind> = OnceCell::new();
 pub static GATEWAY_KINDS: OnceCell<[GroupVersionKind; 4]> = OnceCell::new();
@@ -291,12 +295,12 @@ impl<T> ResultExt<T> for Result<T, T> {
     }
 }
 
-pub fn patch<T: Serialize>(src: &T, dst: &T, ret: AdmissionResponse) -> Result<AdmissionResponse> {
+pub fn patch<T: Serialize>(src: &T, dst: &T) -> Result<Patch> {
     let s = serde_json::to_value(src)?;
     let d = serde_json::to_value(dst)?;
     let p = json_patch::diff(&s, &d);
-    let x = ret.with_patch(p)?;
-    Ok(x)
+    // let x = ret.with_patch(p)?;
+    Ok(p)
 }
 
 #[derive(PartialEq, Eq, Hash)]
@@ -315,14 +319,12 @@ impl From<&GatewayListeners> for ListenerIdentifier {
 
 #[derive(PartialEq, Eq, Hash)]
 pub struct ObjectMetaIdentifier {
-    resource_version: Option<String>,
     name: Option<String>,
     namespace: Option<String>,
 }
 impl From<ObjectMeta> for ObjectMetaIdentifier {
     fn from(value: ObjectMeta) -> Self {
         Self {
-            resource_version: value.resource_version,
             name: value.name,
             namespace: value.namespace,
         }
@@ -334,6 +336,7 @@ pub enum Status {
     Allowed,
     Denied(DenyReason),
     Invalid(String),
+    Patch(Patch),
 }
 
 pub enum DenyReason {
@@ -389,5 +392,66 @@ impl Display for DenyReason {
 pub type AsyncClosure<'a, T> = Box<dyn Fn(T) -> BoxFuture<'a, Result<Status>>>;
 
 pub trait HasMetadata {
-    fn get_metadata(&self) -> ObjectMeta;
+    fn get_metadata(&self) -> &ObjectMeta;
+}
+impl HasMetadata for Ingress {
+    fn get_metadata(&self) -> &ObjectMeta {
+        &self.metadata
+    }
+}
+
+pub fn get_external_dns_hostname(o: &impl HasMetadata) -> Option<String> {
+    o.get_metadata().annotations.as_ref().and_then(|a_s| {
+        a_s.get("external-dns.alpha.kubernetes.io/hostname")
+            .cloned()
+    })
+}
+
+pub trait VecExt<T> {
+    fn push_return(self, value: T) -> Self;
+}
+impl<T> VecExt<T> for Vec<T> {
+    fn push_return(mut self, value: T) -> Self {
+        self.push(value);
+        self
+    }
+}
+
+#[instrument]
+pub fn is_redirect_or_no_rule(httproute: &HTTPRoute) -> bool {
+    if let Some(ref rules) = httproute.spec.rules
+        && rules.len() == 1
+        && let Some(rule) = rules.first()
+        && rule.backend_refs.is_none()
+        && let Some(ref filters) = rule.filters
+        && filters.len() == 1
+        && let Some(filter) = filters.first()
+        && filter.r#type == HTTPRouteRulesFiltersType::RequestRedirect
+        && let Some(ref rr) = filter.request_redirect
+        && rr.scheme == Some(HTTPRouteRulesFiltersRequestRedirectScheme::Https)
+    {
+        // HTTP route with only redirect
+        true
+    } else if httproute.spec.rules.is_none() || httproute.spec.rules == Some(Vec::new()) {
+        // Not for anything yet
+        true
+    } else {
+        tracing::warn!("{}", serde_yaml::to_string(httproute).unwrap());
+        false
+    }
+}
+
+pub fn does_parentref_listener_match(
+    p: &HTTPRouteParentRefs,
+    l: &GatewayListeners,
+    gn: &str,
+    gns: &str,
+    hns: &str,
+) -> bool {
+    let hns = hns.to_string();
+    p.kind == Some("Gateway".to_string())
+        && p.name == gn
+        && p.namespace.as_ref().unwrap_or(&hns) == gns
+        && p.section_name.as_ref().is_none_or(|psn| psn == &l.name)
+        && p.port.is_none_or(|pp| pp == l.port)
 }

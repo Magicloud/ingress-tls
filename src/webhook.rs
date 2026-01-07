@@ -16,9 +16,12 @@ use kube::{
 use rustls::ServerConfig;
 use serde_json::Value;
 
-use crate::gateway::{mutate_gateway, mutate_httproute, validate_gateway, validate_httproute};
 #[allow(clippy::wildcard_imports)]
 use crate::{cli::Cli, helpers::*, ingress::*, tls_cert_resolver::TLSCertResolver};
+use crate::{
+    gateway::{mutate_gateway, validate_gateway},
+    httproute::validate_httproute,
+};
 
 impl Cli {
     pub async fn start(self) -> Result<()> {
@@ -112,6 +115,7 @@ async fn post_validate(admission_review: Json<Value>) -> Json<AdmissionReview<Dy
                             ret.deny(msg.to_string())
                         },
                         Status::Invalid(msg) => AdmissionResponse::invalid(msg),
+                        Status::Patch(_) => unimplemented!(),
                     }
                 }
             }
@@ -135,32 +139,46 @@ async fn post_mutate(
             }
             Ok(req) => {
                 let mut ret = AdmissionResponse::from(&req);
-                if let Some(obj) = req.object {
+                let final_result = if let Some(obj) = req.object {
                     if req.kind == *INGRESS_KIND.get().expect("INGRESS_KIND not initialized")
                         && let Ok(ingress) = dynamic_object2ingress(obj.clone())
                     {
-                        mutate_ingress(ret, &ingress, &conf)
+                        mutate_ingress(&ingress, &conf)
                     } else if GATEWAY_KINDS
                         .get()
                         .expect("GATEWAY_KINDs not initialized")
                         .contains(&req.kind)
                         && let Ok(gateway) = dynamic_object2gateway(obj.clone())
                     {
-                        mutate_gateway(ret, &gateway, &conf).await
+                        // mutate_gateway(ret, &gateway, &conf).await
+                        todo!()
                     } else if HTTPROUTE_KINDS
                         .get()
                         .expect("HTTPROUTE_KINDs not initialized")
                         .contains(&req.kind)
                         && let Ok(httproute) = dynamic_object2httproute(obj)
                     {
-                        mutate_httproute(ret, &httproute)
+                        // mutate_httproute(ret, &httproute)
+                        todo!()
                     } else {
-                        ret = ret.deny("");
-                        ret
+                        todo!()
                     }
                 } else {
-                    ret = ret.deny("");
-                    ret
+                    todo!()
+                };
+                match final_result {
+                    Status::Allowed | Status::MoveOn => {
+                        ret.allowed = true;
+                        ret
+                    }
+                    Status::Denied(msg) => {
+                        if let DenyReason::InternalError(ref report) = msg {
+                            tracing::warn!("{:?}", report);
+                        }
+                        ret.deny(msg.to_string())
+                    }
+                    Status::Invalid(msg) => AdmissionResponse::invalid(msg),
+                    Status::Patch(_) => unimplemented!(),
                 }
             }
         },
