@@ -25,7 +25,7 @@ pub fn validate_ingress(ingress: &Ingress) -> Status {
             .metadata
             .annotations
             .as_ref()
-            .and_then(|a_s| a_s.get(SKIP_VALIDATE_ANNOTATION))
+            .and_then(|a_s| a_s.get(SKIP_ANNOTATION))
             .is_some_and(|v| v == "true")
         {
             Ok(Status::Allowed)
@@ -49,34 +49,31 @@ pub fn validate_ingress(ingress: &Ingress) -> Status {
 
 #[instrument]
 pub fn mutate_ingress(ingress: &Ingress, conf: &Cli) -> Status {
+    let def_ns = "CLUSTERED".to_string();
     match validate_ingress(ingress) {
         Status::Allowed => Status::Allowed,
         Status::Denied(deny_reason) => match deny_reason {
             DenyReason::InternalError(ref _r) => Status::Denied(deny_reason),
             DenyReason::IngressNoTLS => {
-                let edns_hostname = get_external_dns_hostname(ingress);
+                let edns_hostnames = get_external_dns_hostname(ingress);
                 if let Some(ref name) = ingress.metadata.name
                     && let Some(ref spec) = ingress.spec
                     && let Some(ref icn) = spec.ingress_class_name
                     && let icn = SupportedIngressClass::from_str(icn)
                     && let Ok(ic) = icn
                     && let Some(ref rules) = spec.rules
+                    && let Some(edns) = edns_hostnames
                     && let hosts = rules
                         .iter()
-                        .map(|x| x.host.as_ref())
+                        .filter_map(|x| x.host.as_ref())
                         .collect::<Vec<_>>()
-                        .push_return(edns_hostname.as_ref())
+                        .extend_return(edns.iter())
                         .into_iter()
-                        .flatten()
                         .unique()
                         .collect::<Vec<_>>()
                     && !hosts.is_empty()
                 {
-                    let ns = ingress.metadata.namespace.as_ref().unwrap_or_else(|| {
-                        DEFAULT_NAMESPACE
-                            .get()
-                            .expect("DEFAULT_NAMESPACE not initialized")
-                    });
+                    let ns = ingress.metadata.namespace.as_ref().unwrap_or(&def_ns);
                     let tls = vec![IngressTLS {
                         hosts: Some(hosts.into_iter().cloned().collect()),
                         secret_name: Some(format!("{name}-tls")),

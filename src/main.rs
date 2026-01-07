@@ -20,7 +20,7 @@ mod webhook;
 
 use clap::Parser;
 use eyre::Result;
-use kube::{Client, api::GroupVersionKind};
+use kube::api::GroupVersionKind;
 use mimalloc::MiMalloc;
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -86,11 +86,11 @@ async fn real_main() -> Result<()> {
         .await
         .expect("Cannot init HTTPROUTE_KINDS");
 
-    let client = Client::try_default().await?;
-    DEFAULT_NAMESPACE
-        .set(client.default_namespace().to_string())
-        .await
-        .expect("Cannot init DEFAULT_NAMESPACE");
+    // let client = Client::try_default().await?;
+    // DEFAULT_NAMESPACE
+    //     .set(client.default_namespace().to_string())
+    //     .await
+    //     .expect("Cannot init DEFAULT_NAMESPACE");
 
     let cli = Cli::parse();
 

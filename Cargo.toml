@@ -48,3 +48,4 @@ inotify = { version = "*" }
 just-string = { version = "*" }
 mea = { version = "*" }
 itertools = { version = "*" }
+ouroboros = { version = "*" }

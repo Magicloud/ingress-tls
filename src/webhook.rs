@@ -150,8 +150,7 @@ async fn post_mutate(
                         .contains(&req.kind)
                         && let Ok(gateway) = dynamic_object2gateway(obj.clone())
                     {
-                        // mutate_gateway(ret, &gateway, &conf).await
-                        todo!()
+                        mutate_gateway(Arc::new(gateway), &conf).await
                     } else if HTTPROUTE_KINDS
                         .get()
                         .expect("HTTPROUTE_KINDs not initialized")
@@ -178,7 +177,10 @@ async fn post_mutate(
                         ret.deny(msg.to_string())
                     }
                     Status::Invalid(msg) => AdmissionResponse::invalid(msg),
-                    Status::Patch(_) => unimplemented!(),
+                    Status::Patch(p) => match ret.clone().with_patch(p) {
+                        Ok(ret) => ret,
+                        Err(e) => ret.deny(format!("{e:?}")),
+                    },
                 }
             }
         },

@@ -1,6 +1,4 @@
-#![allow(dead_code)]
-
-use std::{collections::HashMap, fmt::Display, str::FromStr};
+use std::{fmt::Display, str::FromStr};
 
 use eyre::{Report, Result, eyre};
 use futures::future::BoxFuture;
@@ -25,13 +23,14 @@ use mea::once::OnceCell;
 use serde::Serialize;
 use tracing::instrument;
 
+use crate::httproute::GatewayListenerPair;
+
 pub static INGRESS_KIND: OnceCell<GroupVersionKind> = OnceCell::new();
 pub static GATEWAY_KINDS: OnceCell<[GroupVersionKind; 4]> = OnceCell::new();
 pub static HTTPROUTE_KINDS: OnceCell<[GroupVersionKind; 4]> = OnceCell::new();
-pub static DEFAULT_NAMESPACE: OnceCell<String> = OnceCell::new();
+// pub static DEFAULT_NAMESPACE: OnceCell<String> = OnceCell::new();
 
-pub const SKIP_VALIDATE_ANNOTATION: &str = "magicloud.github.io/skip_validate";
-pub const SKIP_MUTATE_ANNOTATION: &str = "magicloud.github.io/skip_mutate";
+pub const SKIP_ANNOTATION: &str = "ingress-tls.magiclouds.cn/skip";
 pub const TRAEFIK_MIDDLEWARE_ANNOTATION: &str = "traefik.ingress.kubernetes.io/router.middlewares";
 pub const NGINX_FORCE_SSL_REDIRECT: &str = "nginx.ingress.kubernetes.io/force-ssl-redirect";
 pub const ISSUER: &str = "cert-manager.io/issuer";
@@ -186,6 +185,7 @@ pub enum Namespaces<'a> {
     All,
     Some(Vec<JustString<'a>>),
 }
+#[allow(dead_code)]
 pub enum SelectorByLabel {
     Is(String, String),
     IsNot(String, String),
@@ -256,24 +256,24 @@ impl TryFrom<GatewayListenersAllowedRoutesNamespacesSelectorMatchExpressions> fo
 //     return false;
 // }
 
-pub trait AsyncResultExt<T, E> {
-    async fn and_then_async<U, F, Fut>(self, f: F) -> Result<U, E>
-    where
-        F: FnOnce(T) -> Fut,
-        Fut: Future<Output = Result<U, E>>;
-}
-impl<T, E> AsyncResultExt<T, E> for Result<T, E> {
-    async fn and_then_async<U, F, Fut>(self, f: F) -> Result<U, E>
-    where
-        F: FnOnce(T) -> Fut,
-        Fut: Future<Output = Result<U, E>>,
-    {
-        match self {
-            Ok(value) => f(value).await,
-            Err(e) => Err(e),
-        }
-    }
-}
+// pub trait AsyncResultExt<T, E> {
+//     async fn and_then_async<U, F, Fut>(self, f: F) -> Result<U, E>
+//     where
+//         F: FnOnce(T) -> Fut,
+//         Fut: Future<Output = Result<U, E>>;
+// }
+// impl<T, E> AsyncResultExt<T, E> for Result<T, E> {
+//     async fn and_then_async<U, F, Fut>(self, f: F) -> Result<U, E>
+//     where
+//         F: FnOnce(T) -> Fut,
+//         Fut: Future<Output = Result<U, E>>,
+//     {
+//         match self {
+//             Ok(value) => f(value).await,
+//             Err(e) => Err(e),
+//         }
+//     }
+// }
 
 pub trait OptionExt<T> {
     fn unwrap_ref(&self) -> &T;
@@ -303,33 +303,19 @@ pub fn patch<T: Serialize>(src: &T, dst: &T) -> Result<Patch> {
     Ok(p)
 }
 
-#[derive(PartialEq, Eq, Hash)]
-pub struct ListenerIdentifier {
-    name: String,
-    port: i32,
-}
-impl From<&GatewayListeners> for ListenerIdentifier {
-    fn from(value: &GatewayListeners) -> Self {
-        Self {
-            name: value.name.clone(),
-            port: value.port,
-        }
-    }
-}
-
-#[derive(PartialEq, Eq, Hash)]
-pub struct ObjectMetaIdentifier {
-    name: Option<String>,
-    namespace: Option<String>,
-}
-impl From<ObjectMeta> for ObjectMetaIdentifier {
-    fn from(value: ObjectMeta) -> Self {
-        Self {
-            name: value.name,
-            namespace: value.namespace,
-        }
-    }
-}
+// #[derive(PartialEq, Eq, Hash)]
+// pub struct ObjectMetaIdentifier {
+//     name: Option<String>,
+//     namespace: Option<String>,
+// }
+// impl From<ObjectMeta> for ObjectMetaIdentifier {
+//     fn from(value: ObjectMeta) -> Self {
+//         Self {
+//             name: value.name,
+//             namespace: value.namespace,
+//         }
+//     }
+// }
 
 pub enum Status {
     MoveOn,
@@ -339,20 +325,22 @@ pub enum Status {
     Patch(Patch),
 }
 
+// pub type ListenerName = String;
 pub enum DenyReason {
     InternalError(Report),
     IngressNoTLS,
     GatewayNoTLSListener,
-    GatewayNonRedirectHTTPRouteAttached(HashMap<ListenerIdentifier, Vec<HTTPRoute>>),
-    HTTPRouteNonRedirectAttachedToHTTPListener(
-        HashMap<ObjectMetaIdentifier, Vec<ListenerIdentifier>>,
+    GatewayNonRedirectHTTPRouteAttachedToHTTPListener(
+        Vec<(GatewayListeners, Parted<Vec<HTTPRoute>>)>,
     ),
+    HTTPRouteNonRedirectAttachedToHTTPListener(Vec<GatewayListenerPair>),
 }
 impl Display for DenyReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let def_ns = DEFAULT_NAMESPACE
-            .get()
-            .expect("Cannot get DEFAULT_NAMESPACE");
+        // let def_ns = DEFAULT_NAMESPACE
+        //     .get()
+        //     .expect("Cannot get DEFAULT_NAMESPACE");
+        let def_ns = "CLUSTERED".to_string();
         let empty_string = String::new();
         match self {
             Self::InternalError(report) => {
@@ -362,29 +350,32 @@ impl Display for DenyReason {
             Self::GatewayNoTLSListener => {
                 f.write_str("The Gateway doe s not contain a TLS configuration.")
             }
-            Self::GatewayNonRedirectHTTPRouteAttached(hash_map) => {
-                let httproutes = hash_map
-                    .values()
-                    .flatten()
+            Self::GatewayNonRedirectHTTPRouteAttachedToHTTPListener(listener_routes) => {
+                let httproutes = listener_routes
+                    .iter()
+                    .map(|(_, v)| v)
+                    .flat_map(|x| x.as_ref().bad)
                     .unique_by(|x| (x.metadata.name.as_ref(), x.metadata.namespace.as_ref()))
                     .collect::<Vec<_>>();
                 f.write_str(&format!(
                 "There are {} non-redirect HTTPRoutes (listed below) attaching to HTTP listeners of this Gateway.\n{}",
                 httproutes.len(),
-                httproutes.into_iter().map(|x| format!("{}/{}", x.metadata.namespace.as_ref().unwrap_or(def_ns), x.metadata.name.as_ref().unwrap_or(&empty_string))).join("\n")
+                httproutes.into_iter().map(|x| format!("{}/{}", x.metadata.namespace.as_ref().unwrap_or(&def_ns), x.metadata.name.as_ref().unwrap_or(&empty_string))).join("\n")
             ))
             }
-            Self::HTTPRouteNonRedirectAttachedToHTTPListener(hash_map) => f.write_str(&format!(
-                "This non-redirect HTTPRoute is attaching to HTTP listeners of Gateways: {}",
-                hash_map
-                    .keys()
-                    .map(|x| format!(
-                        "{}/{}",
-                        x.namespace.as_ref().unwrap_or(def_ns),
-                        x.name.as_ref().unwrap_or(&empty_string)
-                    ))
-                    .join("\n")
-            )),
+            Self::HTTPRouteNonRedirectAttachedToHTTPListener(gateway_listeners) => {
+                f.write_str(&format!(
+                    "This non-redirect HTTPRoute is attaching to HTTP listeners of Gateways: {}",
+                    gateway_listeners
+                        .iter()
+                        .map(|x| x.with_gateway(|g| format!(
+                            "{}/{}",
+                            g.metadata.namespace.as_ref().unwrap_or(&def_ns),
+                            g.metadata.name.as_ref().unwrap_or(&empty_string)
+                        )))
+                        .join("\n")
+                ))
+            }
         }
     }
 }
@@ -399,20 +390,46 @@ impl HasMetadata for Ingress {
         &self.metadata
     }
 }
+impl HasMetadata for Gateway {
+    fn get_metadata(&self) -> &ObjectMeta {
+        &self.metadata
+    }
+}
 
-pub fn get_external_dns_hostname(o: &impl HasMetadata) -> Option<String> {
+pub fn get_external_dns_hostname(o: &impl HasMetadata) -> Option<Vec<String>> {
     o.get_metadata().annotations.as_ref().and_then(|a_s| {
         a_s.get("external-dns.alpha.kubernetes.io/hostname")
-            .cloned()
+            .map(|s| {
+                s.split(',')
+                    // .filter(|x| !x.contains('*') && !x.starts_with('.'))
+                    .map(|x| {
+                        if x.starts_with('.') {
+                            format!("*{x}")
+                        } else {
+                            x.to_string()
+                        }
+                    })
+                    .collect()
+            })
     })
 }
 
 pub trait VecExt<T> {
-    fn push_return(self, value: T) -> Self;
+    // fn push_return(self, value: T) -> Self;
+    // fn append_return(self, other: &mut Vec<T>) -> Self;
+    fn extend_return(self, iter: impl IntoIterator<Item = T>) -> Self;
 }
 impl<T> VecExt<T> for Vec<T> {
-    fn push_return(mut self, value: T) -> Self {
-        self.push(value);
+    // fn push_return(mut self, value: T) -> Self {
+    //     self.push(value);
+    //     self
+    // }
+    // fn append_return(mut self, other: &mut Self) -> Self {
+    //     self.append(other);
+    //     self
+    // }
+    fn extend_return(mut self, iter: impl IntoIterator<Item = T>) -> Self {
+        self.extend(iter);
         self
     }
 }
@@ -454,4 +471,18 @@ pub fn does_parentref_listener_match(
         && p.namespace.as_ref().unwrap_or(&hns) == gns
         && p.section_name.as_ref().is_none_or(|psn| psn == &l.name)
         && p.port.is_none_or(|pp| pp == l.port)
+}
+
+#[derive(Debug)]
+pub struct Parted<T> {
+    pub good: T,
+    pub bad: T,
+}
+impl<T> Parted<T> {
+    pub const fn as_ref(&self) -> Parted<&T> {
+        Parted {
+            good: &self.good,
+            bad: &self.bad,
+        }
+    }
 }

@@ -1,16 +1,17 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use eyre::Result;
 use futures::{StreamExt, stream};
 use gateway_api::{
-    gateways::Gateway,
+    gateways::{Gateway, GatewayListeners},
     httproutes::{HTTPRoute, HTTPRouteParentRefs},
 };
 use kube::core::admission::AdmissionResponse;
+use ouroboros::self_referencing;
 use tracing::instrument;
 
 #[allow(clippy::wildcard_imports)]
-use crate::{cli::Cli, helpers::*};
+use crate::helpers::*;
 
 // rewrite httproute to attach to same gateway's https listener, find by hostname, if possible. Or if there is only one.
 #[instrument]
@@ -22,7 +23,7 @@ pub async fn validate_httproute(httproute: Arc<HTTPRoute>) -> Status {
                 if x.metadata
                     .annotations
                     .as_ref()
-                    .and_then(|a_s| a_s.get(SKIP_VALIDATE_ANNOTATION))
+                    .and_then(|a_s| a_s.get(SKIP_ANNOTATION))
                     .is_some_and(|v| v == "true")
                 {
                     Ok(Status::Allowed)
@@ -54,11 +55,9 @@ pub async fn validate_httproute(httproute: Arc<HTTPRoute>) -> Status {
         // attached to http listener
         Box::new(|x| {
             Box::pin(async move {
-                let def_ns = DEFAULT_NAMESPACE
-                    .get()
-                    .expect("Cannot get DEFAULT_NAMESPACE");
+                let def_ns = "CLUSTERED".to_string();
                 let parentrefs = x.spec.parent_refs.unwrap_ref();
-                let httproute_namespace = x.metadata.namespace.as_ref().unwrap_or(def_ns);
+                let httproute_namespace = x.metadata.namespace.as_ref().unwrap_or(&def_ns);
                 let result = stream::iter(parentrefs)
                     .filter_map(|p| async {
                         filter_gateway_of_http_listener_attached_to(p, httproute_namespace)
@@ -68,15 +67,12 @@ pub async fn validate_httproute(httproute: Arc<HTTPRoute>) -> Status {
                     .collect::<Vec<_>>()
                     .await
                     .into_iter()
-                    .map(|r| r.map(|(g, lis)| (g.metadata.into(), lis)))
                     .collect::<Result<Vec<_>>>();
-                result.map(|gateways| {
-                    if gateways.is_empty() {
+                result.map(|glps| {
+                    if glps.is_empty() {
                         Status::Allowed
                     } else {
-                        Status::Denied(DenyReason::HTTPRouteNonRedirectAttachedToHTTPListener(
-                            HashMap::from_iter(gateways),
-                        ))
+                        Status::Denied(DenyReason::HTTPRouteNonRedirectAttachedToHTTPListener(glps))
                     }
                 })
             })
@@ -112,30 +108,46 @@ pub fn mutate_httproute(
 async fn filter_gateway_of_http_listener_attached_to(
     p: &HTTPRouteParentRefs,
     httproute_namespace: &str,
-) -> Result<Option<(Gateway, Vec<ListenerIdentifier>)>> {
-    let def_ns = DEFAULT_NAMESPACE
-        .get()
-        .expect("Cannot get DEFAULT_NAMESPACE");
+) -> Result<Option<GatewayListenerPair>> {
+    let def_ns = "CLUSTERED".to_string();
     let empty_string = String::new();
     if p.kind.as_ref().is_some_and(|x| x == "Gateway") {
-        let gateway = get_gateway(p.namespace.as_ref().unwrap_or(def_ns), &p.name).await?;
+        let gateway = get_gateway(p.namespace.as_ref().unwrap_or(&def_ns), &p.name).await?;
         let ret = gateway.map(|g| {
-            let gn = g.metadata.name.as_ref().unwrap_or(&empty_string);
-            let gns = g.metadata.namespace.as_ref().unwrap_or(def_ns);
-            let lis = g
-                .spec
-                .listeners
-                .iter()
-                .filter(|listener| {
-                    listener.protocol == "HTTP"
-                        && does_parentref_listener_match(p, listener, gn, gns, httproute_namespace)
-                })
-                .map(|l| l.into())
-                .collect();
-            (g, lis)
+            GatewayListenerPairBuilder {
+                gateway: g,
+                listeners_builder: |gateway| {
+                    let gn = gateway.metadata.name.as_ref().unwrap_or(&empty_string);
+                    let gns = gateway.metadata.namespace.as_ref().unwrap_or(&def_ns);
+                    gateway
+                        .spec
+                        .listeners
+                        .iter()
+                        .filter(|listener| {
+                            listener.protocol == "HTTP"
+                                && does_parentref_listener_match(
+                                    p,
+                                    listener,
+                                    gn,
+                                    gns,
+                                    httproute_namespace,
+                                )
+                        })
+                        .collect()
+                },
+            }
+            .build()
         });
         Ok(ret)
     } else {
         Ok(None)
     }
+}
+
+#[self_referencing]
+pub struct GatewayListenerPair {
+    pub gateway: Gateway,
+    #[borrows(gateway)]
+    #[covariant]
+    pub listeners: Vec<&'this GatewayListeners>,
 }
