@@ -333,7 +333,7 @@ pub enum DenyReason {
     GatewayNonRedirectHTTPRouteAttachedToHTTPListener(
         Vec<(GatewayListeners, Parted<Vec<HTTPRoute>>)>,
     ),
-    HTTPRouteNonRedirectAttachedToHTTPListener(Vec<GatewayListenerPair>),
+    HTTPRouteNonRedirectAttachedToHTTPListener(Vec<(HTTPRouteParentRefs, GatewayListenerPair)>),
 }
 impl Display for DenyReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -368,7 +368,7 @@ impl Display for DenyReason {
                     "This non-redirect HTTPRoute is attaching to HTTP listeners of Gateways: {}",
                     gateway_listeners
                         .iter()
-                        .map(|x| x.with_gateway(|g| format!(
+                        .map(|(_, x)| x.with_gateway(|g| format!(
                             "{}/{}",
                             g.metadata.namespace.as_ref().unwrap_or(&def_ns),
                             g.metadata.name.as_ref().unwrap_or(&empty_string)

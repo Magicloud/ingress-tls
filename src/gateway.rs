@@ -92,6 +92,7 @@ pub async fn validate_gateway(gateway: Arc<Gateway>) -> Status {
 }
 
 type ListenerHTTPRoutes<'a> = (&'a GatewayListeners, Parted<Vec<HTTPRoute>>);
+
 #[instrument]
 async fn get_bad_httproutes_for_gateway<'a>(
     gateway: &'a Gateway,

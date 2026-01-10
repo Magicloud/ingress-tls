@@ -6,14 +6,13 @@ use gateway_api::{
     gateways::{Gateway, GatewayListeners},
     httproutes::{HTTPRoute, HTTPRouteParentRefs},
 };
-use kube::core::admission::AdmissionResponse;
+use itertools::Itertools;
 use ouroboros::self_referencing;
 use tracing::instrument;
 
 #[allow(clippy::wildcard_imports)]
 use crate::helpers::*;
 
-// rewrite httproute to attach to same gateway's https listener, find by hostname, if possible. Or if there is only one.
 #[instrument]
 pub async fn validate_httproute(httproute: Arc<HTTPRoute>) -> Status {
     let checks: Vec<AsyncClosure<'_, Arc<HTTPRoute>>> = vec![
@@ -63,6 +62,7 @@ pub async fn validate_httproute(httproute: Arc<HTTPRoute>) -> Status {
                         filter_gateway_of_http_listener_attached_to(p, httproute_namespace)
                             .await
                             .transpose()
+                            .map(|x| x.map(|y| (p.clone(), y)))
                     })
                     .collect::<Vec<_>>()
                     .await
@@ -97,13 +97,109 @@ pub async fn validate_httproute(httproute: Arc<HTTPRoute>) -> Status {
     accum
 }
 
-pub fn mutate_httproute(
-    mut ret: AdmissionResponse,
-    mut httproute: &HTTPRoute,
-) -> AdmissionResponse {
-    todo!()
+// rewrite httproute to attach to same gateway's https listener, find by hostname, if possible. Or if there is only one.
+#[instrument]
+pub async fn mutate_httproute(httproute: Arc<HTTPRoute>) -> Status {
+    let mut target = (*httproute).clone();
+    match validate_httproute(httproute.clone()).await {
+        Status::Allowed => Status::Allowed,
+        Status::Denied(deny_reason) => match deny_reason {
+            DenyReason::InternalError(ref _r) => Status::Denied(deny_reason),
+            DenyReason::HTTPRouteNonRedirectAttachedToHTTPListener(gateway_listener_pairs) => {
+                let bad_refs: Vec<_> = gateway_listener_pairs.iter().map(|(x, _)| x).collect();
+                if let Some(ps) = target.spec.parent_refs.as_mut() {
+                    ps.retain(|p| !bad_refs.contains(&p));
+                }
+                for (_, http_listener) in gateway_listener_pairs {
+                    // gateway is matched by name/namespace. hence following two vars must be there.
+                    let gn = http_listener
+                        .borrow_gateway()
+                        .metadata
+                        .name
+                        .as_ref()
+                        .unwrap();
+                    let gns = http_listener
+                        .borrow_gateway()
+                        .metadata
+                        .namespace
+                        .as_ref()
+                        .unwrap();
+                    // 1. hostnames (http listener + route) match
+                    // 2. the only https listener
+                    let mut hostnames: Vec<&String> = httproute
+                        .spec
+                        .hostnames
+                        .as_ref()
+                        .map(|v| v.iter().collect())
+                        .unwrap_or_default();
+                    hostnames.extend(
+                        http_listener
+                            .borrow_listeners()
+                            .iter()
+                            .filter_map(|l| l.hostname.as_ref()),
+                    );
+                    let hostnames: Vec<_> = hostnames.into_iter().unique().collect();
+                    let candidates = http_listener
+                        .borrow_gateway()
+                        .spec
+                        .listeners
+                        .iter()
+                        .filter(|l| l.protocol == "HTTPS")
+                        .collect::<Vec<_>>();
+                    if target.spec.parent_refs.is_none() {
+                        target.spec.parent_refs = Some(vec![]);
+                    }
+                    if candidates.len() == 1 {
+                        let listener = candidates.first().unwrap();
+                        if let Some(v) = target.spec.parent_refs.as_mut() {
+                            v.push(HTTPRouteParentRefs {
+                                group: None,
+                                kind: Some("Gateway".to_string()),
+                                name: gn.clone(),
+                                namespace: Some(gns.clone()),
+                                port: Some(listener.port),
+                                section_name: Some(listener.name.clone()),
+                            });
+                        }
+                    } else if hostnames.iter().all(|h| {
+                        candidates
+                            .iter()
+                            .any(|c| c.hostname.as_ref().is_some_and(|ch| ch == *h))
+                    }) {
+                        // find https listeners that match all hostnames from routes and http listeners
+                        let hostname_matches = candidates.iter().filter(|l| {
+                            l.hostname
+                                .as_ref()
+                                .is_some_and(|lh| !lh.is_empty() && hostnames.contains(&lh))
+                        });
+                        for l in hostname_matches {
+                            if let Some(v) = target.spec.parent_refs.as_mut() {
+                                v.push(HTTPRouteParentRefs {
+                                    group: None,
+                                    kind: Some("Gateway".to_string()),
+                                    name: gn.clone(),
+                                    namespace: Some(gns.clone()),
+                                    port: Some(l.port),
+                                    section_name: Some(l.name.clone()),
+                                });
+                            }
+                        }
+                    } else {
+                        // invalid
+                    }
+                }
+                match patch(httproute.as_ref(), &target) {
+                    Ok(_) => todo!(),
+                    Err(_) => todo!(),
+                }
+            }
+            _ => unimplemented!(),
+        },
+        _ => unimplemented!(),
+    }
 }
 
+// TODO: filter on gateway side, the allowed routes
 #[instrument]
 async fn filter_gateway_of_http_listener_attached_to(
     p: &HTTPRouteParentRefs,
@@ -113,8 +209,8 @@ async fn filter_gateway_of_http_listener_attached_to(
     let empty_string = String::new();
     if p.kind.as_ref().is_some_and(|x| x == "Gateway") {
         let gateway = get_gateway(p.namespace.as_ref().unwrap_or(&def_ns), &p.name).await?;
-        let ret = gateway.map(|g| {
-            GatewayListenerPairBuilder {
+        let ret = gateway.and_then(|g| {
+            let glp = GatewayListenerPairBuilder {
                 gateway: g,
                 listeners_builder: |gateway| {
                     let gn = gateway.metadata.name.as_ref().unwrap_or(&empty_string);
@@ -136,7 +232,12 @@ async fn filter_gateway_of_http_listener_attached_to(
                         .collect()
                 },
             }
-            .build()
+            .build();
+            if glp.borrow_listeners().is_empty() {
+                None
+            } else {
+                Some(glp)
+            }
         });
         Ok(ret)
     } else {

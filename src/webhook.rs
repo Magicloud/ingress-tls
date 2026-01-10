@@ -20,7 +20,7 @@ use serde_json::Value;
 use crate::{cli::Cli, helpers::*, ingress::*, tls_cert_resolver::TLSCertResolver};
 use crate::{
     gateway::{mutate_gateway, validate_gateway},
-    httproute::validate_httproute,
+    httproute::{mutate_httproute, validate_httproute},
 };
 
 impl Cli {
@@ -157,13 +157,12 @@ async fn post_mutate(
                         .contains(&req.kind)
                         && let Ok(httproute) = dynamic_object2httproute(obj)
                     {
-                        // mutate_httproute(ret, &httproute)
-                        todo!()
+                        mutate_httproute(Arc::new(httproute)).await
                     } else {
-                        todo!()
+                        unimplemented!()
                     }
                 } else {
-                    todo!()
+                    Status::Invalid("No object passed".to_string())
                 };
                 match final_result {
                     Status::Allowed | Status::MoveOn => {
