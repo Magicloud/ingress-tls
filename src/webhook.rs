@@ -65,64 +65,63 @@ fn json_guard(ctx: &GuardContext<'_>) -> bool {
 
 #[post("/validate", guard = "json_guard")]
 async fn post_validate(admission_review: Json<Value>) -> Json<AdmissionReview<DynamicObject>> {
+    match post_validate_(admission_review).await {
+        Ok(ret) => Json(ret.into_review()),
+        Err(e) => Json(AdmissionResponse::invalid(format!("{e:?}")).into_review()),
+    }
+}
+
+async fn post_validate_(admission_review: Json<Value>) -> Result<AdmissionResponse> {
     let json = admission_review.into_inner();
-    let ret = match serde_json::from_value::<AdmissionReview<DynamicObject>>(json) {
-        Ok(ar) => {
-            // One may use `ar.request` according to doc. But that is wrong. `try_into` is the proper way.
-            // `request` returns a broken `AdmissionRequest`, such as no api version and kind data.
-            match <AdmissionReview<DynamicObject> as TryInto<
-                AdmissionRequest<DynamicObject>,
-            >>::try_into(ar)
-            {
-                Err(_) => AdmissionResponse::invalid("No request got"),
-                Ok(req) => {
-                    let mut ret = AdmissionResponse::from(&req);
-                    let final_result = if let Some(obj) = req.object {
-                        tracing::debug!("Processing {:?}", req.kind);
-                        if req.kind == *INGRESS_KIND.get().expect("INGRESS_KIND not initialized")
-                            && let Ok(ingress) = dynamic_object2ingress(obj.clone())
-                        {
-                            validate_ingress(&ingress)
-                        } else if GATEWAY_KINDS
-                            .get()
-                            .expect("GATEWAY_KINDs not initialized")
-                            .contains(&req.kind)
-                            && let Ok(gateway) = dynamic_object2gateway(obj.clone())
-                        {
-                            validate_gateway(Arc::new(gateway)).await
-                        } else if HTTPROUTE_KINDS
-                            .get()
-                            .expect("HTTPROUTE_KINDs not initialized")
-                            .contains(&req.kind)
-                            && let Ok(httproute) = dynamic_object2httproute(obj)
-                        {
-                            validate_httproute(Arc::new(httproute)).await
-                        } else {
-                            unimplemented!()
-                        }
-                    } else {
-                        Status::Invalid("No object passed".to_string())
-                    };
-                    match final_result {
-                        Status::Allowed | Status::MoveOn => {
-                            ret.allowed = true;
-                            ret
-                        }
-                        Status::Denied(msg) => {
-                            if let DenyReason::InternalError(ref report) = msg {
-                            tracing::warn!("{:?}", report);
-                            }
-                            ret.deny(msg.to_string())
-                        },
-                        Status::Invalid(msg) => AdmissionResponse::invalid(msg),
-                        Status::Patch(_) => unimplemented!(),
-                    }
-                }
-            }
+    let ar = serde_json::from_value::<AdmissionReview<DynamicObject>>(json)?;
+    // One may use `ar.request` according to doc. But that is wrong. `try_into` is the proper way.
+    // `request` returns a broken `AdmissionRequest`, such as no api version and kind data.
+    let req =
+        <AdmissionReview<DynamicObject> as TryInto<AdmissionRequest<DynamicObject>>>::try_into(ar)?;
+    let mut ret = AdmissionResponse::from(&req);
+    let final_result = if let Some(obj) = req.object {
+        tracing::debug!("Processing {:?}", req.kind);
+        if req.kind == *INGRESS_KIND.get().expect("INGRESS_KIND not initialized")
+            && let Ok(ingress) = dynamic_object2ingress(obj.clone())
+        {
+            validate_ingress(&ingress)?
+        } else if GATEWAY_KINDS
+            .get()
+            .expect("GATEWAY_KINDs not initialized")
+            .contains(&req.kind)
+            && let Ok(gateway) = dynamic_object2gateway(obj.clone())
+        {
+            // validate_gateway(Arc::new(gateway)).await
+            todo!()
+        } else if HTTPROUTE_KINDS
+            .get()
+            .expect("HTTPROUTE_KINDs not initialized")
+            .contains(&req.kind)
+            && let Ok(httproute) = dynamic_object2httproute(obj)
+        {
+            // validate_httproute(Arc::new(httproute)).await
+            todo!()
+        } else {
+            unimplemented!()
         }
-        Err(e) => AdmissionResponse::invalid(format!("{e:?}")),
+    } else {
+        Status::Invalid("No object passed".to_string())
     };
-    Json(ret.into_review())
+    let ret = match final_result {
+        Status::Allowed | Status::MoveOn => {
+            ret.allowed = true;
+            ret
+        }
+        Status::Denied(msg) => {
+            if let DenyReason::InternalError(ref report) = msg {
+                tracing::warn!("{:?}", report);
+            }
+            ret.deny(msg.to_string())
+        }
+        Status::Invalid(msg) => AdmissionResponse::invalid(msg),
+        Status::Patch(_) => unimplemented!(),
+    };
+    Ok(ret)
 }
 
 #[post("/mutate", guard = "json_guard")]
@@ -130,60 +129,63 @@ async fn post_mutate(
     admission_review: Json<Value>,
     conf: Data<Arc<Cli>>,
 ) -> Json<AdmissionReview<DynamicObject>> {
+    match post_mutate_(admission_review, conf).await {
+        Ok(ret) => Json(ret.into_review()),
+        Err(e) => Json(AdmissionResponse::invalid(format!("{e:?}")).into_review()),
+    }
+}
+
+async fn post_mutate_(
+    admission_review: Json<Value>,
+    conf: Data<Arc<Cli>>,
+) -> Result<AdmissionResponse> {
     let json = admission_review.into_inner();
-    let ret = match serde_json::from_value::<AdmissionReview<DynamicObject>>(json) {
-        Ok(ar) => match ar.try_into() {
-            Err(e) => {
-                tracing::error!("{e:?}");
-                AdmissionResponse::invalid("No request got")
-            }
-            Ok(req) => {
-                let mut ret = AdmissionResponse::from(&req);
-                let final_result = if let Some(obj) = req.object {
-                    if req.kind == *INGRESS_KIND.get().expect("INGRESS_KIND not initialized")
-                        && let Ok(ingress) = dynamic_object2ingress(obj.clone())
-                    {
-                        mutate_ingress(&ingress, &conf)
-                    } else if GATEWAY_KINDS
-                        .get()
-                        .expect("GATEWAY_KINDs not initialized")
-                        .contains(&req.kind)
-                        && let Ok(gateway) = dynamic_object2gateway(obj.clone())
-                    {
-                        mutate_gateway(Arc::new(gateway), &conf).await
-                    } else if HTTPROUTE_KINDS
-                        .get()
-                        .expect("HTTPROUTE_KINDs not initialized")
-                        .contains(&req.kind)
-                        && let Ok(httproute) = dynamic_object2httproute(obj)
-                    {
-                        mutate_httproute(Arc::new(httproute)).await
-                    } else {
-                        unimplemented!()
-                    }
-                } else {
-                    Status::Invalid("No object passed".to_string())
-                };
-                match final_result {
-                    Status::Allowed | Status::MoveOn => {
-                        ret.allowed = true;
-                        ret
-                    }
-                    Status::Denied(msg) => {
-                        if let DenyReason::InternalError(ref report) = msg {
-                            tracing::warn!("{:?}", report);
-                        }
-                        ret.deny(msg.to_string())
-                    }
-                    Status::Invalid(msg) => AdmissionResponse::invalid(msg),
-                    Status::Patch(p) => match ret.clone().with_patch(p) {
-                        Ok(ret) => ret,
-                        Err(e) => ret.deny(format!("{e:?}")),
-                    },
-                }
-            }
-        },
-        Err(e) => AdmissionResponse::invalid(format!("{e:?}")),
+    let ar = serde_json::from_value::<AdmissionReview<DynamicObject>>(json)?;
+    let req = ar.try_into()?;
+    let mut ret = AdmissionResponse::from(&req);
+    let final_result = if let Some(obj) = req.object {
+        if req.kind == *INGRESS_KIND.get().expect("INGRESS_KIND not initialized")
+            && let Ok(ingress) = dynamic_object2ingress(obj.clone())
+        {
+            mutate_ingress(&ingress, &conf)?
+        } else if GATEWAY_KINDS
+            .get()
+            .expect("GATEWAY_KINDs not initialized")
+            .contains(&req.kind)
+            && let Ok(gateway) = dynamic_object2gateway(obj.clone())
+        {
+            // mutate_gateway(Arc::new(gateway), &conf).await
+            todo!()
+        } else if HTTPROUTE_KINDS
+            .get()
+            .expect("HTTPROUTE_KINDs not initialized")
+            .contains(&req.kind)
+            && let Ok(httproute) = dynamic_object2httproute(obj)
+        {
+            // mutate_httproute(Arc::new(httproute)).await
+            todo!()
+        } else {
+            unimplemented!()
+        }
+    } else {
+        Status::Invalid("No object passed".to_string())
     };
-    Json(ret.into_review())
+    let ret = match final_result {
+        Status::Allowed | Status::MoveOn => {
+            ret.allowed = true;
+            ret
+        }
+        Status::Denied(msg) => {
+            if let DenyReason::InternalError(ref report) = msg {
+                tracing::warn!("{:?}", report);
+            }
+            ret.deny(msg.to_string())
+        }
+        Status::Invalid(msg) => AdmissionResponse::invalid(msg),
+        Status::Patch(p) => match ret.clone().with_patch(p) {
+            Ok(ret) => ret,
+            Err(e) => ret.deny(format!("{e:?}")),
+        },
+    };
+    Ok(ret)
 }

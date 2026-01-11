@@ -9,101 +9,60 @@ use tracing::instrument;
 use crate::{cli::Cli, helpers::*};
 
 #[instrument]
-pub fn validate_ingress(ingress: &Ingress) -> Status {
+pub fn validate_ingress(ingress: &Ingress) -> Result<Status> {
     let has_tls = || {
-        if let Some(spec) = ingress.spec.as_ref()
-            && let Some(tls) = spec.tls.as_ref()
-            && !tls.is_empty()
-        {
-            Ok(Status::MoveOn)
+        if ingress.spec.as_ref()?.tls.as_ref()?.is_empty() {
+            Some(Ok(Status::MoveOn))
         } else {
-            Ok(Status::Denied(DenyReason::IngressNoTLS))
+            Some(Ok(Status::Denied(DenyReason::IngressNoTLS)))
         }
     };
     let skip = || {
-        if ingress
+        let skip = ingress
             .metadata
             .annotations
-            .as_ref()
-            .and_then(|a_s| a_s.get(SKIP_ANNOTATION))
-            .is_some_and(|v| v == "true")
-        {
-            Ok(Status::Allowed)
+            .as_ref()?
+            .get(SKIP_ANNOTATION)?;
+        if skip == "true" {
+            Some(Ok(Status::Allowed))
         } else {
-            Ok(Status::MoveOn)
+            Some(Ok(Status::MoveOn))
         }
     };
 
-    let checks: Vec<Box<dyn Fn() -> Result<Status>>> = vec![Box::new(skip), Box::new(has_tls)];
-    checks
-        .into_iter()
-        .try_fold(Status::MoveOn, |b, f| match b {
-            Status::MoveOn => match f() {
-                Ok(x) => Ok(x),
-                Err(e) => Err(Status::Denied(DenyReason::InternalError(e))),
-            },
-            x => Err(x),
-        })
-        .extract()
+    let checks: Vec<Box<dyn Fn() -> Option<Result<Status>>>> =
+        vec![Box::new(skip), Box::new(has_tls)];
+    let mut accum = Ok(Status::MoveOn);
+    for check in checks {
+        if matches!(accum, Ok(Status::MoveOn)) {
+            match check() {
+                Some(s) => accum = s,
+                None => {
+                    accum = Ok(Status::Invalid(
+                        "The input does not contain enough information".to_string(),
+                    ));
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    accum
 }
 
 #[instrument]
-pub fn mutate_ingress(ingress: &Ingress, conf: &Cli) -> Status {
-    let def_ns = "CLUSTERED".to_string();
-    match validate_ingress(ingress) {
-        Status::Allowed => Status::Allowed,
-        Status::Denied(deny_reason) => match deny_reason {
-            DenyReason::InternalError(ref _r) => Status::Denied(deny_reason),
-            DenyReason::IngressNoTLS => {
-                let edns_hostnames = get_external_dns_hostname(ingress);
-                if let Some(ref name) = ingress.metadata.name
-                    && let Some(ref spec) = ingress.spec
-                    && let Some(ref icn) = spec.ingress_class_name
-                    && let icn = SupportedIngressClass::from_str(icn)
-                    && let Ok(ic) = icn
-                    && let Some(ref rules) = spec.rules
-                    && let Some(edns) = edns_hostnames
-                    && let hosts = rules
-                        .iter()
-                        .filter_map(|x| x.host.as_ref())
-                        .collect::<Vec<_>>()
-                        .extend_return(edns.iter())
-                        .into_iter()
-                        .unique()
-                        .collect::<Vec<_>>()
-                    && !hosts.is_empty()
-                {
-                    let ns = ingress.metadata.namespace.as_ref().unwrap_or(&def_ns);
-                    let tls = vec![IngressTLS {
-                        hosts: Some(hosts.into_iter().cloned().collect()),
-                        secret_name: Some(format!("{name}-tls")),
-                    }];
-                    let mut target = ingress.clone();
-                    let mut annotations = target.metadata.annotations.take().unwrap_or_default();
-                    if let Some(s) = target.spec.as_mut() {
-                        s.tls = Some(tls);
-                    }
-                    patch_annotations(&mut annotations, &ic, ns, conf);
-                    target.metadata.annotations = Some(annotations);
-
-                    match patch(ingress, &target) {
-                        Ok(p) => Status::Patch(p),
-                        Err(e) => Status::Denied(DenyReason::InternalError(e)),
-                    }
-                } else {
-                    Status::Invalid("The Ingress does not contain enough information".to_string())
-                }
-            }
-            _ => unimplemented!(),
-        },
-        _ => unimplemented!(),
-    }
+pub fn mutate_ingress(ingress: &Ingress, conf: &Cli) -> Result<Status> {
+    mutate_ingress_(ingress, conf).unwrap_or_else(|| {
+        Ok(Status::Invalid(
+            "The input does not contain enough information".to_string(),
+        ))
+    })
 }
 
 #[instrument]
 fn patch_annotations(
     annotations: &mut BTreeMap<String, String>,
-    ic: &SupportedIngressClass,
+    ic: &Result<SupportedIngressClass>,
     ns: &str,
     conf: &Cli,
 ) {
@@ -131,20 +90,73 @@ fn patch_annotations(
             }
         }
     }
-    match ic {
-        SupportedIngressClass::Traefik => {
-            if let Some(ref value) = conf.traefik_ingress_redirect_resource_name {
-                let (ns, n) = value.split_once('/').unwrap_or((ns, value));
-                let a = format!("{ns}-{n}@kubernetescrd");
+    if let Ok(ic) = ic {
+        match ic {
+            SupportedIngressClass::Traefik => {
+                if let Some(ref value) = conf.traefik_ingress_redirect_resource_name {
+                    let (ns, n) = value.split_once('/').unwrap_or((ns, value));
+                    let a = format!("{ns}-{n}@kubernetescrd");
+                    annotations
+                        .entry(TRAEFIK_MIDDLEWARE_ANNOTATION.to_string())
+                        .or_insert(a);
+                }
+            }
+            SupportedIngressClass::Nginx => {
                 annotations
-                    .entry(TRAEFIK_MIDDLEWARE_ANNOTATION.to_string())
-                    .or_insert(a);
+                    .entry(NGINX_FORCE_SSL_REDIRECT.to_string())
+                    .or_insert_with(|| "true".to_string());
             }
         }
-        SupportedIngressClass::Nginx => {
-            annotations
-                .entry(NGINX_FORCE_SSL_REDIRECT.to_string())
-                .or_insert_with(|| "true".to_string());
+    } else {
+        tracing::warn!("{ic:?}");
+    }
+}
+
+#[instrument]
+fn mutate_ingress_(ingress: &Ingress, conf: &Cli) -> Option<Result<Status>> {
+    let validate_result = validate_ingress(ingress);
+    if matches!(
+        validate_result,
+        Ok(Status::Denied(DenyReason::IngressNoTLS))
+    ) {
+        let name = ingress.metadata.name.as_ref()?;
+        let ns = ingress.metadata.namespace.as_ref()?;
+        let ic =
+            SupportedIngressClass::from_str(ingress.spec.as_ref()?.ingress_class_name.as_ref()?);
+        let mut hosts = ingress
+            .spec
+            .as_ref()?
+            .rules
+            .as_ref()?
+            .iter()
+            .filter_map(|x| x.host.clone())
+            .collect::<Vec<_>>();
+        if let Some(edns) = get_external_dns_hostname(ingress) {
+            hosts.extend(edns.into_iter());
         }
+        let hosts = hosts.into_iter().unique().collect::<Vec<_>>();
+        let ret = if hosts.is_empty() {
+            Status::Invalid("The Ingress does not contain hosts information".to_string())
+        } else {
+            let tls = vec![IngressTLS {
+                hosts: Some(hosts),
+                secret_name: Some(format!("{name}-tls")),
+            }];
+            let mut target = ingress.clone();
+            let mut annotations = target.metadata.annotations.take().unwrap_or_default();
+            if let Some(s) = target.spec.as_mut() {
+                s.tls = Some(tls);
+            }
+            patch_annotations(&mut annotations, &ic, ns, conf);
+            target.metadata.annotations = Some(annotations);
+
+            match patch(ingress, &target) {
+                Ok(p) => Status::Patch(p),
+                Err(e) => Status::Denied(DenyReason::InternalError(e)),
+            }
+        };
+        Some(Ok(ret))
+    } else {
+        Some(validate_result)
     }
 }

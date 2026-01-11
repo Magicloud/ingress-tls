@@ -28,8 +28,6 @@ use crate::httproute::GatewayListenerPair;
 pub static INGRESS_KIND: OnceCell<GroupVersionKind> = OnceCell::new();
 pub static GATEWAY_KINDS: OnceCell<[GroupVersionKind; 4]> = OnceCell::new();
 pub static HTTPROUTE_KINDS: OnceCell<[GroupVersionKind; 4]> = OnceCell::new();
-// pub static DEFAULT_NAMESPACE: OnceCell<String> = OnceCell::new();
-
 pub const SKIP_ANNOTATION: &str = "ingress-tls.magiclouds.cn/skip";
 pub const TRAEFIK_MIDDLEWARE_ANNOTATION: &str = "traefik.ingress.kubernetes.io/router.middlewares";
 pub const NGINX_FORCE_SSL_REDIRECT: &str = "nginx.ingress.kubernetes.io/force-ssl-redirect";
@@ -299,23 +297,8 @@ pub fn patch<T: Serialize>(src: &T, dst: &T) -> Result<Patch> {
     let s = serde_json::to_value(src)?;
     let d = serde_json::to_value(dst)?;
     let p = json_patch::diff(&s, &d);
-    // let x = ret.with_patch(p)?;
     Ok(p)
 }
-
-// #[derive(PartialEq, Eq, Hash)]
-// pub struct ObjectMetaIdentifier {
-//     name: Option<String>,
-//     namespace: Option<String>,
-// }
-// impl From<ObjectMeta> for ObjectMetaIdentifier {
-//     fn from(value: ObjectMeta) -> Self {
-//         Self {
-//             name: value.name,
-//             namespace: value.namespace,
-//         }
-//     }
-// }
 
 pub enum Status {
     MoveOn,
@@ -325,7 +308,6 @@ pub enum Status {
     Patch(Patch),
 }
 
-// pub type ListenerName = String;
 pub enum DenyReason {
     InternalError(Report),
     IngressNoTLS,
@@ -453,7 +435,6 @@ pub fn is_redirect_or_no_rule(httproute: &HTTPRoute) -> bool {
         // Not for anything yet
         true
     } else {
-        tracing::warn!("{}", serde_yaml::to_string(httproute).unwrap());
         false
     }
 }
