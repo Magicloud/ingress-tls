@@ -15,86 +15,87 @@ use crate::helpers::*;
 
 #[instrument]
 pub async fn validate_httproute(httproute: Arc<HTTPRoute>) -> Status {
-    let checks: Vec<AsyncClosure<'_, Arc<HTTPRoute>>> = vec![
-        // skip
-        Box::new(|x| {
-            Box::pin(async move {
-                if x.metadata
-                    .annotations
-                    .as_ref()
-                    .and_then(|a_s| a_s.get(SKIP_ANNOTATION))
-                    .is_some_and(|v| v == "true")
-                {
-                    Ok(Status::Allowed)
-                } else {
-                    Ok(Status::MoveOn)
-                }
-            })
-        }),
-        // redirect
-        Box::new(|x| {
-            Box::pin(async move {
-                if is_redirect_or_no_rule(&x) {
-                    Ok(Status::Allowed)
-                } else {
-                    Ok(Status::MoveOn)
-                }
-            })
-        }),
-        // no parents yet
-        Box::new(|x| {
-            Box::pin(async move {
-                if x.spec.parent_refs.is_none() {
-                    Ok(Status::Allowed)
-                } else {
-                    Ok(Status::MoveOn)
-                }
-            })
-        }),
-        // attached to http listener
-        Box::new(|x| {
-            Box::pin(async move {
-                let def_ns = "CLUSTERED".to_string();
-                let parentrefs = x.spec.parent_refs.unwrap_ref();
-                let httproute_namespace = x.metadata.namespace.as_ref().unwrap_or(&def_ns);
-                let result = stream::iter(parentrefs)
-                    .filter_map(|p| async {
-                        filter_gateway_of_http_listener_attached_to(p, httproute_namespace)
-                            .await
-                            .transpose()
-                            .map(|x| x.map(|y| (p.clone(), y)))
-                    })
-                    .collect::<Vec<_>>()
-                    .await
-                    .into_iter()
-                    .collect::<Result<Vec<_>>>();
-                result.map(|glps| {
-                    if glps.is_empty() {
-                        Status::Allowed
-                    } else {
-                        Status::Denied(DenyReason::HTTPRouteNonRedirectAttachedToHTTPListener(glps))
-                    }
-                })
-            })
-        }),
-    ];
-    let mut accum = Status::MoveOn;
-    for check in checks {
-        let x = httproute.clone();
-        let ret = match accum {
-            Status::MoveOn => match check(x).await {
-                Ok(x) => Ok(x),
-                Err(e) => Err(Status::Denied(DenyReason::InternalError(e))),
-            },
-            x => Err(x),
-        };
-        let is_err = ret.is_err();
-        accum = ret.extract();
-        if is_err {
-            break;
-        }
-    }
-    accum
+    let checks = todo!();
+    // let checks: Vec<AsyncClosure<'_, Arc<HTTPRoute>>> = vec![
+    //     // skip
+    //     Box::new(|x| {
+    //         Box::pin(async move {
+    //             if x.metadata
+    //                 .annotations
+    //                 .as_ref()
+    //                 .and_then(|a_s| a_s.get(SKIP_ANNOTATION))
+    //                 .is_some_and(|v| v == "true")
+    //             {
+    //                 Ok(Status::Allowed)
+    //             } else {
+    //                 Ok(Status::MoveOn)
+    //             }
+    //         })
+    //     }),
+    //     // redirect
+    //     Box::new(|x| {
+    //         Box::pin(async move {
+    //             if is_redirect_or_no_rule(&x) {
+    //                 Ok(Status::Allowed)
+    //             } else {
+    //                 Ok(Status::MoveOn)
+    //             }
+    //         })
+    //     }),
+    //     // no parents yet
+    //     Box::new(|x| {
+    //         Box::pin(async move {
+    //             if x.spec.parent_refs.is_none() {
+    //                 Ok(Status::Allowed)
+    //             } else {
+    //                 Ok(Status::MoveOn)
+    //             }
+    //         })
+    //     }),
+    //     // attached to http listener
+    //     Box::new(|x| {
+    //         Box::pin(async move {
+    //             let def_ns = "CLUSTERED".to_string();
+    //             let parentrefs = x.spec.parent_refs.unwrap_ref();
+    //             let httproute_namespace = x.metadata.namespace.as_ref().unwrap_or(&def_ns);
+    //             let result = stream::iter(parentrefs)
+    //                 .filter_map(|p| async {
+    //                     filter_gateway_of_http_listener_attached_to(p, httproute_namespace)
+    //                         .await
+    //                         .transpose()
+    //                         .map(|x| x.map(|y| (p.clone(), y)))
+    //                 })
+    //                 .collect::<Vec<_>>()
+    //                 .await
+    //                 .into_iter()
+    //                 .collect::<Result<Vec<_>>>();
+    //             result.map(|glps| {
+    //                 if glps.is_empty() {
+    //                     Status::Allowed
+    //                 } else {
+    //                     Status::Denied(DenyReason::HTTPRouteNonRedirectAttachedToHTTPListener(glps))
+    //                 }
+    //             })
+    //         })
+    //     }),
+    // ];
+    // let mut accum = Status::MoveOn;
+    // for check in checks {
+    //     let x = httproute.clone();
+    //     let ret = match accum {
+    //         Status::MoveOn => match check(x).await {
+    //             Ok(x) => Ok(x),
+    //             Err(e) => Err(Status::Denied(DenyReason::InternalError(e))),
+    //         },
+    //         x => Err(x),
+    //     };
+    //     let is_err = ret.is_err();
+    //     accum = ret.extract();
+    //     if is_err {
+    //         break;
+    //     }
+    // }
+    // accum
 }
 
 // rewrite httproute to attach to same gateway's https listener, find by hostname, if possible. Or if there is only one.

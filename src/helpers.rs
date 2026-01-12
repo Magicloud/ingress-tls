@@ -1,4 +1,4 @@
-use std::{fmt::Display, str::FromStr};
+use std::{fmt::Display, str::FromStr, sync::Arc};
 
 use eyre::{Report, Result, eyre};
 use futures::future::BoxFuture;
@@ -18,6 +18,7 @@ use k8s_openapi::api::{core::v1::Namespace, networking::v1::Ingress};
 use kube::{
     Api, Client,
     api::{DynamicObject, GroupVersionKind, ListParams, ObjectMeta},
+    core::admission::AdmissionResponse,
 };
 use mea::once::OnceCell;
 use serde::Serialize;
@@ -25,9 +26,6 @@ use tracing::instrument;
 
 use crate::httproute::GatewayListenerPair;
 
-pub static INGRESS_KIND: OnceCell<GroupVersionKind> = OnceCell::new();
-pub static GATEWAY_KINDS: OnceCell<[GroupVersionKind; 4]> = OnceCell::new();
-pub static HTTPROUTE_KINDS: OnceCell<[GroupVersionKind; 4]> = OnceCell::new();
 pub const SKIP_ANNOTATION: &str = "ingress-tls.magiclouds.cn/skip";
 pub const TRAEFIK_MIDDLEWARE_ANNOTATION: &str = "traefik.ingress.kubernetes.io/router.middlewares";
 pub const NGINX_FORCE_SSL_REDIRECT: &str = "nginx.ingress.kubernetes.io/force-ssl-redirect";
@@ -307,6 +305,38 @@ pub enum Status {
     Invalid(String),
     Patch(Patch),
 }
+impl From<Option<Result<Self>>> for Status {
+    fn from(value: Option<Result<Self>>) -> Self {
+        match value {
+            Some(Ok(s)) => s,
+            Some(Err(e)) => {
+                tracing::warn!("{e:?}");
+                Self::Denied(DenyReason::InternalError(e))
+            }
+            None => Self::Invalid("Input does not contain enough information".to_string()),
+        }
+    }
+}
+
+pub struct StatusAdmissionResponse(Status, AdmissionResponse);
+impl From<(Status, AdmissionResponse)> for StatusAdmissionResponse {
+    fn from(value: (Status, AdmissionResponse)) -> Self {
+        Self(value.0, value.1)
+    }
+}
+impl From<StatusAdmissionResponse> for AdmissionResponse {
+    fn from(StatusAdmissionResponse(s, mut a): StatusAdmissionResponse) -> Self {
+        match s {
+            Status::Allowed | Status::MoveOn => {
+                a.allowed = true;
+                a
+            }
+            Status::Denied(msg) => a.deny(msg.to_string()),
+            Status::Invalid(msg) => a.deny(msg),
+            Status::Patch(_) => unimplemented!(),
+        }
+    }
+}
 
 pub enum DenyReason {
     InternalError(Report),
@@ -362,7 +392,47 @@ impl Display for DenyReason {
     }
 }
 
-pub type AsyncClosure<'a, T> = Box<dyn Fn(T) -> BoxFuture<'a, Result<Status>>>;
+pub trait ControlFlow {
+    fn initialize_value() -> Self;
+    fn is_continue(&self) -> bool;
+    fn is_break(&self) -> bool {
+        !self.is_continue()
+    }
+}
+
+impl ControlFlow for Option<Result<Status>> {
+    fn initialize_value() -> Self {
+        Some(Ok(Status::MoveOn))
+    }
+
+    fn is_continue(&self) -> bool {
+        matches!(self, Some(Ok(Status::MoveOn)) | None)
+    }
+}
+
+pub type AsyncClosure<'a, I, O> = Box<dyn Fn(Arc<I>) -> BoxFuture<'a, O>>;
+pub struct Checks<'a, I, O>(Vec<AsyncClosure<'a, I, O>>);
+impl<I, O: ControlFlow> Checks<'_, I, O> {
+    pub async fn run(&self, input: Arc<I>) -> O {
+        let mut accum = O::initialize_value();
+        for check in &self.0 {
+            let x = input.clone();
+            if accum.is_continue() {
+                accum = check(x).await;
+            } else if accum.is_break() {
+                break;
+            } else {
+                unimplemented!()
+            }
+        }
+        accum
+    }
+}
+impl<'a, I, O> From<Vec<AsyncClosure<'a, I, O>>> for Checks<'a, I, O> {
+    fn from(value: Vec<AsyncClosure<'a, I, O>>) -> Self {
+        Self(value)
+    }
+}
 
 pub trait HasMetadata {
     fn get_metadata(&self) -> &ObjectMeta;
@@ -376,6 +446,15 @@ impl HasMetadata for Gateway {
     fn get_metadata(&self) -> &ObjectMeta {
         &self.metadata
     }
+}
+
+pub fn get_skip(o: &impl HasMetadata) -> Option<&String> {
+    let skip = o
+        .get_metadata()
+        .annotations
+        .as_ref()?
+        .get(SKIP_ANNOTATION)?;
+    Some(skip)
 }
 
 pub fn get_external_dns_hostname(o: &impl HasMetadata) -> Option<Vec<String>> {

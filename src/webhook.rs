@@ -15,12 +15,11 @@ use kube::{
 };
 use rustls::ServerConfig;
 use serde_json::Value;
+use tracing::instrument;
 
 #[allow(clippy::wildcard_imports)]
-use crate::{cli::Cli, helpers::*, ingress::*, tls_cert_resolver::TLSCertResolver};
 use crate::{
-    gateway::{mutate_gateway, validate_gateway},
-    httproute::{mutate_httproute, validate_httproute},
+    cli::Cli, gateway::*, helpers::*, httproute::*, ingress::*, tls_cert_resolver::TLSCertResolver,
 };
 
 impl Cli {
@@ -65,12 +64,12 @@ fn json_guard(ctx: &GuardContext<'_>) -> bool {
 
 #[post("/validate", guard = "json_guard")]
 async fn post_validate(admission_review: Json<Value>) -> Json<AdmissionReview<DynamicObject>> {
-    match post_validate_(admission_review).await {
-        Ok(ret) => Json(ret.into_review()),
-        Err(e) => Json(AdmissionResponse::invalid(format!("{e:?}")).into_review()),
-    }
+    post_validate_(admission_review)
+        .await
+        .map_or_else(|_| todo!(), |ret| Json(ret.into_review()))
 }
 
+#[instrument]
 async fn post_validate_(admission_review: Json<Value>) -> Result<AdmissionResponse> {
     let json = admission_review.into_inner();
     let ar = serde_json::from_value::<AdmissionReview<DynamicObject>>(json)?;
@@ -78,50 +77,31 @@ async fn post_validate_(admission_review: Json<Value>) -> Result<AdmissionRespon
     // `request` returns a broken `AdmissionRequest`, such as no api version and kind data.
     let req =
         <AdmissionReview<DynamicObject> as TryInto<AdmissionRequest<DynamicObject>>>::try_into(ar)?;
-    let mut ret = AdmissionResponse::from(&req);
+    let ret = AdmissionResponse::from(&req);
     let final_result = if let Some(obj) = req.object {
-        tracing::debug!("Processing {:?}", req.kind);
-        if req.kind == *INGRESS_KIND.get().expect("INGRESS_KIND not initialized")
-            && let Ok(ingress) = dynamic_object2ingress(obj.clone())
-        {
-            validate_ingress(&ingress)?
-        } else if GATEWAY_KINDS
-            .get()
-            .expect("GATEWAY_KINDs not initialized")
-            .contains(&req.kind)
-            && let Ok(gateway) = dynamic_object2gateway(obj.clone())
-        {
-            // validate_gateway(Arc::new(gateway)).await
+        tracing::debug!("Processing {:?}/{:?}", req.kind, obj.types);
+        let dot = obj.types.as_ref().map(|t| &t.kind);
+        let ret = if dot.is_some_and(|x| x == "Ingress") {
+            let ingress = dynamic_object2ingress(obj)?;
+            validate_ingress().run(Arc::new(ingress)).await
+        } else if dot.is_some_and(|x| x == "Gateway") {
+            let gateway = dynamic_object2gateway(obj)?;
+            // validate_gateway().run(Arc::new(gateway)).await
             todo!()
-        } else if HTTPROUTE_KINDS
-            .get()
-            .expect("HTTPROUTE_KINDs not initialized")
-            .contains(&req.kind)
-            && let Ok(httproute) = dynamic_object2httproute(obj)
-        {
-            // validate_httproute(Arc::new(httproute)).await
+        } else if dot.is_some_and(|x| x == "HTTPRoute") {
+            let httproute = dynamic_object2httproute(obj)?;
+            // validate_gateway().run(Arc::new(gateway)).await
             todo!()
         } else {
             unimplemented!()
-        }
+        };
+        ret.into()
     } else {
         Status::Invalid("No object passed".to_string())
     };
-    let ret = match final_result {
-        Status::Allowed | Status::MoveOn => {
-            ret.allowed = true;
-            ret
-        }
-        Status::Denied(msg) => {
-            if let DenyReason::InternalError(ref report) = msg {
-                tracing::warn!("{:?}", report);
-            }
-            ret.deny(msg.to_string())
-        }
-        Status::Invalid(msg) => AdmissionResponse::invalid(msg),
-        Status::Patch(_) => unimplemented!(),
-    };
-    Ok(ret)
+
+    let x: StatusAdmissionResponse = (final_result, ret).into();
+    Ok(x.into())
 }
 
 #[post("/mutate", guard = "json_guard")]
@@ -131,7 +111,7 @@ async fn post_mutate(
 ) -> Json<AdmissionReview<DynamicObject>> {
     match post_mutate_(admission_review, conf).await {
         Ok(ret) => Json(ret.into_review()),
-        Err(e) => Json(AdmissionResponse::invalid(format!("{e:?}")).into_review()),
+        Err(_) => todo!(),
     }
 }
 
@@ -142,50 +122,29 @@ async fn post_mutate_(
     let json = admission_review.into_inner();
     let ar = serde_json::from_value::<AdmissionReview<DynamicObject>>(json)?;
     let req = ar.try_into()?;
-    let mut ret = AdmissionResponse::from(&req);
+    let ret = AdmissionResponse::from(&req);
     let final_result = if let Some(obj) = req.object {
-        if req.kind == *INGRESS_KIND.get().expect("INGRESS_KIND not initialized")
-            && let Ok(ingress) = dynamic_object2ingress(obj.clone())
-        {
-            mutate_ingress(&ingress, &conf)?
-        } else if GATEWAY_KINDS
-            .get()
-            .expect("GATEWAY_KINDs not initialized")
-            .contains(&req.kind)
-            && let Ok(gateway) = dynamic_object2gateway(obj.clone())
-        {
-            // mutate_gateway(Arc::new(gateway), &conf).await
+        tracing::debug!("Processing {:?}/{:?}", req.kind, obj.types);
+        let dynamic_object_type = obj.types.as_ref().map(|t| &t.kind);
+        let ret = if dynamic_object_type.is_some_and(|x| x == "Ingress") {
+            let ingress = dynamic_object2ingress(obj)?;
+            mutate_ingress(Arc::new(ingress), &conf).await
+        } else if dynamic_object_type.is_some_and(|x| x == "Gateway") {
+            let gateway = dynamic_object2gateway(obj)?;
+            // validate_gateway().run(Arc::new(gateway)).await
             todo!()
-        } else if HTTPROUTE_KINDS
-            .get()
-            .expect("HTTPROUTE_KINDs not initialized")
-            .contains(&req.kind)
-            && let Ok(httproute) = dynamic_object2httproute(obj)
-        {
-            // mutate_httproute(Arc::new(httproute)).await
+        } else if dynamic_object_type.is_some_and(|x| x == "HTTPRoute") {
+            let httproute = dynamic_object2httproute(obj)?;
+            // validate_gateway().run(Arc::new(gateway)).await
             todo!()
         } else {
             unimplemented!()
-        }
+        };
+        ret.into()
     } else {
         Status::Invalid("No object passed".to_string())
     };
-    let ret = match final_result {
-        Status::Allowed | Status::MoveOn => {
-            ret.allowed = true;
-            ret
-        }
-        Status::Denied(msg) => {
-            if let DenyReason::InternalError(ref report) = msg {
-                tracing::warn!("{:?}", report);
-            }
-            ret.deny(msg.to_string())
-        }
-        Status::Invalid(msg) => AdmissionResponse::invalid(msg),
-        Status::Patch(p) => match ret.clone().with_patch(p) {
-            Ok(ret) => ret,
-            Err(e) => ret.deny(format!("{e:?}")),
-        },
-    };
-    Ok(ret)
+
+    let x: StatusAdmissionResponse = (final_result, ret).into();
+    Ok(x.into())
 }

@@ -22,73 +22,74 @@ use crate::{cli::Cli, helpers::*};
 // http one must only be redirect. So if no https route, accessing fails.
 #[instrument]
 pub async fn validate_gateway(gateway: Arc<Gateway>) -> Status {
-    let checks: Vec<AsyncClosure<'_, Arc<Gateway>>> = vec![
-        // skip
-        Box::new(|x| {
-            Box::pin(async move {
-                if x.metadata
-                    .annotations
-                    .as_ref()
-                    .and_then(|a_s| a_s.get(SKIP_ANNOTATION))
-                    .is_some_and(|v| v == "true")
-                {
-                    Ok(Status::Allowed) as Result<Status>
-                } else {
-                    Ok(Status::MoveOn)
-                }
-            })
-        }),
-        // non-redirect HTTPRoutes attached
-        Box::new(|x| {
-            Box::pin(async move {
-                let bad = get_bad_httproutes_for_gateway(&x).await?;
-                if bad.is_empty() {
-                    Ok(Status::MoveOn)
-                } else {
-                    Ok(Status::Denied(
-                        DenyReason::GatewayNonRedirectHTTPRouteAttachedToHTTPListener(
-                            bad.into_iter().map(|(l, v)| (l.clone(), v)).collect(),
-                        ),
-                    )) as Result<Status>
-                }
-            })
-        }),
-        // no TLS listener
-        Box::new(|x| {
-            Box::pin(async move {
-                if x.spec.listeners.iter().any(|l| l.protocol == "HTTPS")
-                // `HTTPS` without `tls` is invalid, won't be programmed.
-                // Hence it is reasonable not checking the following.
-                // && let Some(ref tls) = listener.tls
-                // && (tls.mode == Some(GatewayListenersTlsMode::Passthrough)
-                //     || (tls.mode == Some(GatewayListenersTlsMode::Terminate)
-                //         && tls.certificate_refs.is_some()
-                //         && !tls.certificate_refs.as_ref().unwrap().is_empty()))
-                {
-                    Ok(Status::MoveOn) as Result<Status>
-                } else {
-                    Ok(Status::Denied(DenyReason::GatewayNoTLSListener))
-                }
-            })
-        }),
-    ];
-    let mut accum = Status::MoveOn;
-    for check in checks {
-        let x = gateway.clone();
-        let ret = match accum {
-            Status::MoveOn => match check(x).await {
-                Ok(x) => Ok(x),
-                Err(e) => Err(Status::Denied(DenyReason::InternalError(e))),
-            },
-            x => Err(x),
-        };
-        let is_err = ret.is_err();
-        accum = ret.extract();
-        if is_err {
-            break;
-        }
-    }
-    accum
+    todo!()
+    // let checks: Vec<AsyncClosure<'_, Arc<Gateway>>> = vec![
+    //     // skip
+    //     Box::new(|x| {
+    //         Box::pin(async move {
+    //             if x.metadata
+    //                 .annotations
+    //                 .as_ref()
+    //                 .and_then(|a_s| a_s.get(SKIP_ANNOTATION))
+    //                 .is_some_and(|v| v == "true")
+    //             {
+    //                 Ok(Status::Allowed) as Result<Status>
+    //             } else {
+    //                 Ok(Status::MoveOn)
+    //             }
+    //         })
+    //     }),
+    //     // non-redirect HTTPRoutes attached
+    //     Box::new(|x| {
+    //         Box::pin(async move {
+    //             let bad = get_bad_httproutes_for_gateway(&x).await?;
+    //             if bad.is_empty() {
+    //                 Ok(Status::MoveOn)
+    //             } else {
+    //                 Ok(Status::Denied(
+    //                     DenyReason::GatewayNonRedirectHTTPRouteAttachedToHTTPListener(
+    //                         bad.into_iter().map(|(l, v)| (l.clone(), v)).collect(),
+    //                     ),
+    //                 )) as Result<Status>
+    //             }
+    //         })
+    //     }),
+    //     // no TLS listener
+    //     Box::new(|x| {
+    //         Box::pin(async move {
+    //             if x.spec.listeners.iter().any(|l| l.protocol == "HTTPS")
+    //             // `HTTPS` without `tls` is invalid, won't be programmed.
+    //             // Hence it is reasonable not checking the following.
+    //             // && let Some(ref tls) = listener.tls
+    //             // && (tls.mode == Some(GatewayListenersTlsMode::Passthrough)
+    //             //     || (tls.mode == Some(GatewayListenersTlsMode::Terminate)
+    //             //         && tls.certificate_refs.is_some()
+    //             //         && !tls.certificate_refs.as_ref().unwrap().is_empty()))
+    //             {
+    //                 Ok(Status::MoveOn) as Result<Status>
+    //             } else {
+    //                 Ok(Status::Denied(DenyReason::GatewayNoTLSListener))
+    //             }
+    //         })
+    //     }),
+    // ];
+    // let mut accum = Status::MoveOn;
+    // for check in checks {
+    //     let x = gateway.clone();
+    //     let ret = match accum {
+    //         Status::MoveOn => match check(x).await {
+    //             Ok(x) => Ok(x),
+    //             Err(e) => Err(Status::Denied(DenyReason::InternalError(e))),
+    //         },
+    //         x => Err(x),
+    //     };
+    //     let is_err = ret.is_err();
+    //     accum = ret.extract();
+    //     if is_err {
+    //         break;
+    //     }
+    // }
+    // accum
 }
 
 type ListenerHTTPRoutes<'a> = (&'a GatewayListeners, Parted<Vec<HTTPRoute>>);
