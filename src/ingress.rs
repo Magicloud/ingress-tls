@@ -44,10 +44,10 @@ pub fn validate_ingress<'a>() -> Checks<'a, Ingress, Option<Result<Status>>> {
 
 #[instrument]
 pub async fn mutate_ingress(ingress: Arc<Ingress>, conf: &Cli) -> Option<Result<Status>> {
-    let validate_result = validate_ingress().run(ingress.clone()).await;
+    let validate_result = validate_ingress().run(ingress.clone()).await?;
     if matches!(
         validate_result,
-        Some(Ok(Status::Denied(DenyReason::IngressNoTLS)))
+        Ok(Status::Denied(DenyReason::IngressNoTLS))
     ) {
         let name = ingress.metadata.name.as_ref()?;
         let ns = ingress.metadata.namespace.as_ref()?;
@@ -86,7 +86,7 @@ pub async fn mutate_ingress(ingress: Arc<Ingress>, conf: &Cli) -> Option<Result<
         };
         Some(ret)
     } else {
-        validate_result
+        Some(validate_result)
     }
 }
 

@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use eyre::Result;
+use futures::{StreamExt, stream};
 use gateway_api::{
     gateways::{
         Gateway, GatewayListeners, GatewayListenersAllowedRoutes,
@@ -10,7 +11,6 @@ use gateway_api::{
     httproutes::HTTPRoute,
 };
 use itertools::Itertools;
-use just_string::JustString;
 use tracing::instrument;
 
 #[allow(clippy::wildcard_imports)]
@@ -21,75 +21,56 @@ use crate::{cli::Cli, helpers::*};
 // httproute should be (parent)http -> redirect, (parent)https -> allow.
 // http one must only be redirect. So if no https route, accessing fails.
 #[instrument]
-pub async fn validate_gateway(gateway: Arc<Gateway>) -> Status {
-    todo!()
-    // let checks: Vec<AsyncClosure<'_, Arc<Gateway>>> = vec![
-    //     // skip
-    //     Box::new(|x| {
-    //         Box::pin(async move {
-    //             if x.metadata
-    //                 .annotations
-    //                 .as_ref()
-    //                 .and_then(|a_s| a_s.get(SKIP_ANNOTATION))
-    //                 .is_some_and(|v| v == "true")
-    //             {
-    //                 Ok(Status::Allowed) as Result<Status>
-    //             } else {
-    //                 Ok(Status::MoveOn)
-    //             }
-    //         })
-    //     }),
-    //     // non-redirect HTTPRoutes attached
-    //     Box::new(|x| {
-    //         Box::pin(async move {
-    //             let bad = get_bad_httproutes_for_gateway(&x).await?;
-    //             if bad.is_empty() {
-    //                 Ok(Status::MoveOn)
-    //             } else {
-    //                 Ok(Status::Denied(
-    //                     DenyReason::GatewayNonRedirectHTTPRouteAttachedToHTTPListener(
-    //                         bad.into_iter().map(|(l, v)| (l.clone(), v)).collect(),
-    //                     ),
-    //                 )) as Result<Status>
-    //             }
-    //         })
-    //     }),
-    //     // no TLS listener
-    //     Box::new(|x| {
-    //         Box::pin(async move {
-    //             if x.spec.listeners.iter().any(|l| l.protocol == "HTTPS")
-    //             // `HTTPS` without `tls` is invalid, won't be programmed.
-    //             // Hence it is reasonable not checking the following.
-    //             // && let Some(ref tls) = listener.tls
-    //             // && (tls.mode == Some(GatewayListenersTlsMode::Passthrough)
-    //             //     || (tls.mode == Some(GatewayListenersTlsMode::Terminate)
-    //             //         && tls.certificate_refs.is_some()
-    //             //         && !tls.certificate_refs.as_ref().unwrap().is_empty()))
-    //             {
-    //                 Ok(Status::MoveOn) as Result<Status>
-    //             } else {
-    //                 Ok(Status::Denied(DenyReason::GatewayNoTLSListener))
-    //             }
-    //         })
-    //     }),
-    // ];
-    // let mut accum = Status::MoveOn;
-    // for check in checks {
-    //     let x = gateway.clone();
-    //     let ret = match accum {
-    //         Status::MoveOn => match check(x).await {
-    //             Ok(x) => Ok(x),
-    //             Err(e) => Err(Status::Denied(DenyReason::InternalError(e))),
-    //         },
-    //         x => Err(x),
-    //     };
-    //     let is_err = ret.is_err();
-    //     accum = ret.extract();
-    //     if is_err {
-    //         break;
-    //     }
-    // }
-    // accum
+pub fn validate_gateway<'a>() -> Checks<'a, Gateway, Option<Result<Status>>> {
+    let x: Vec<AsyncClosure<'a, Gateway, Option<Result<Status>>>> = vec![
+        // skip
+        Box::new(|gateway| {
+            Box::pin(async move {
+                let skip = get_skip(gateway.as_ref())?;
+                if skip == "true" {
+                    Some(Ok(Status::Allowed))
+                } else {
+                    Some(Ok(Status::MoveOn))
+                }
+            })
+        }),
+        // non-redirect HTTPRoutes attached
+        Box::new(|gateway| {
+            Box::pin(async move {
+                let ret = get_bad_httproutes_for_gateway(&gateway).await?.map(|bad| {
+                    if bad.is_empty() {
+                        Status::MoveOn
+                    } else {
+                        Status::Denied(
+                            DenyReason::GatewayNonRedirectHTTPRouteAttachedToHTTPListener(
+                                bad.into_iter().map(|(l, v)| (l.clone(), v)).collect(),
+                            ),
+                        )
+                    }
+                });
+                Some(ret)
+            })
+        }),
+        // no TLS listener
+        Box::new(|x| {
+            Box::pin(async move {
+                if x.spec.listeners.iter().any(|l| l.protocol == "HTTPS")
+                // `HTTPS` without `tls` is invalid, won't be programmed.
+                // Hence it is reasonable not checking the following.
+                // && let Some(ref tls) = listener.tls
+                // && (tls.mode == Some(GatewayListenersTlsMode::Passthrough)
+                //     || (tls.mode == Some(GatewayListenersTlsMode::Terminate)
+                //         && tls.certificate_refs.is_some()
+                //         && !tls.certificate_refs.as_ref().unwrap().is_empty()))
+                {
+                    Some(Ok(Status::MoveOn))
+                } else {
+                    Some(Ok(Status::Denied(DenyReason::GatewayNoTLSListener)))
+                }
+            })
+        }),
+    ];
+    x.into()
 }
 
 type ListenerHTTPRoutes<'a> = (&'a GatewayListeners, Parted<Vec<HTTPRoute>>);
@@ -97,43 +78,46 @@ type ListenerHTTPRoutes<'a> = (&'a GatewayListeners, Parted<Vec<HTTPRoute>>);
 #[instrument]
 async fn get_bad_httproutes_for_gateway<'a>(
     gateway: &'a Gateway,
-) -> Result<Vec<ListenerHTTPRoutes<'a>>> {
+) -> Option<Result<Vec<ListenerHTTPRoutes<'a>>>> {
     let http_listeners = gateway
         .spec
         .listeners
         .iter()
         .filter(|l| l.protocol == "HTTP");
-    let def_ns = "CLUSTERED".to_string();
-    if let Some(ref gateway_name) = gateway.metadata.name {
-        let mut ret = vec![];
-        for (i, listener) in http_listeners.enumerate() {
-            tracing::debug!("Working on listener {i}: {}", listener.name,);
-            let httproutes = get_httproutes_for_listener(
-                listener,
-                gateway_name,
-                gateway.metadata.namespace.as_ref().unwrap_or(&def_ns),
-            )
-            .await?;
-            tracing::debug!(
-                "{} HTTPRoute-s are attached to this listener",
-                httproutes.len()
-            );
-            let parted: (Vec<HTTPRoute>, Vec<HTTPRoute>) =
-                httproutes.into_iter().partition(is_redirect_or_no_rule);
-            if !parted.1.is_empty() {
-                ret.push((
-                    listener,
-                    Parted {
-                        good: parted.0,
-                        bad: parted.1,
-                    },
-                ));
-            }
-        }
-        Ok(ret)
-    } else {
-        Ok(vec![])
-    }
+    let gateway_name = gateway.metadata.name.as_ref()?;
+    let gateway_namespace = gateway.metadata.namespace.as_ref()?;
+
+    let ret = stream::iter(http_listeners)
+        .filter_map(|listener| async move {
+            get_httproutes_for_listener(listener, gateway_name, gateway_namespace)
+                .await?
+                .map(|httproutes| {
+                    tracing::debug!(
+                        "{} HTTPRoute-s are attached to this listener",
+                        httproutes.len()
+                    );
+                    let parted: (Vec<HTTPRoute>, Vec<HTTPRoute>) =
+                        httproutes.into_iter().partition(is_redirect_or_no_rule);
+                    if parted.1.is_empty() {
+                        None
+                    } else {
+                        Some((
+                            listener,
+                            Parted {
+                                good: parted.0,
+                                bad: parted.1,
+                            },
+                        ))
+                    }
+                })
+                .transpose()
+        })
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>>>();
+
+    Some(ret)
 }
 
 #[instrument]
@@ -141,60 +125,62 @@ async fn get_httproutes_for_listener(
     listener: &GatewayListeners,
     gateway_name: &str,
     gateway_namespace: &str,
-) -> Result<Vec<HTTPRoute>> {
-    let def_ns = "CLUSTERED".to_string();
-    if let Some(ref ar) = listener.allowed_routes {
-        let ns_sel = ar
-            .namespaces
-            .as_ref()
-            .unwrap_or(&GatewayListenersAllowedRoutesNamespaces {
-                from: Some(GatewayListenersAllowedRoutesNamespacesFrom::Same),
-                selector: None,
-            });
-        // convert to `Namespaces`
-        let namespaces = match ns_sel.from {
-            Some(GatewayListenersAllowedRoutesNamespacesFrom::All) => Namespaces::All,
-            Some(GatewayListenersAllowedRoutesNamespacesFrom::Selector) => {
-                let m = ns_sel
-                    .selector
+) -> Option<Result<Vec<HTTPRoute>>> {
+    let try_closure = || {
+        let x = listener.allowed_routes.as_ref()?.namespaces.as_ref()?;
+        Some(x)
+    };
+    let ns_sel = try_closure().unwrap_or(&GatewayListenersAllowedRoutesNamespaces {
+        from: Some(GatewayListenersAllowedRoutesNamespacesFrom::Same),
+        selector: None,
+    });
+    let namespaces: Result<Namespaces<'_>> = match ns_sel.from {
+        Some(GatewayListenersAllowedRoutesNamespacesFrom::All) => Ok(Namespaces::All),
+        Some(GatewayListenersAllowedRoutesNamespacesFrom::Selector) => {
+            let s = ns_sel.selector.as_ref()?;
+            let try_closure = || async {
+                let m = s.match_expressions.as_ref().map_or(Ok(vec![]), |x| {
+                    x.iter()
+                        .map(|x| x.clone().try_into())
+                        .collect::<Result<Vec<_>>>()
+                })?;
+                let empty_btreemap = BTreeMap::new();
+                let mut l = s
+                    .match_labels
                     .as_ref()
-                    .and_then(|sel| sel.match_expressions.clone())
-                    .map(|exps| {
-                        exps.into_iter()
-                            .map(std::convert::TryInto::try_into)
-                            .collect::<Result<Vec<SelectorByLabel>>>()
-                    })
-                    .transpose()?
-                    .unwrap_or_default();
-                let mut l = ns_sel
-                    .selector
-                    .as_ref()
-                    .and_then(|sel| sel.match_labels.clone())
-                    .map(|lbls| {
-                        lbls.into_iter()
-                            .map(std::convert::Into::into)
-                            .collect::<Vec<SelectorByLabel>>()
-                    })
-                    .unwrap_or_default();
+                    .unwrap_or(&empty_btreemap)
+                    .iter()
+                    .map(std::convert::Into::into)
+                    .collect::<Vec<_>>();
                 let mut selectors = m;
                 selectors.append(&mut l);
                 let nss = filter_namespaces(&selectors).await?;
-                Namespaces::Some(nss.into_iter().map(JustString::String).collect())
-            }
-            Some(GatewayListenersAllowedRoutesNamespacesFrom::Same) | None => {
-                Namespaces::Some(vec![JustString::RefStr(gateway_namespace)])
-            }
-        };
+                Ok(Namespaces::Some(
+                    nss.into_iter().map(std::convert::Into::into).collect(),
+                ))
+            };
+            try_closure().await
+        }
+        Some(GatewayListenersAllowedRoutesNamespacesFrom::Same) | None => {
+            Ok(Namespaces::Some(vec![gateway_namespace.into()]))
+        }
+    };
+    let try_closure = || async {
+        let namespaces = namespaces?;
         tracing::debug!("{namespaces:?}");
         // Get HTTPRoutes that parentRef to this Gateway
         let httproutes = get_httproutes(&namespaces).await?;
         tracing::debug!("Totally {} HTTPRoutes found", httproutes.len());
         let x: Vec<HTTPRoute> = httproutes
             .into_iter()
-            .filter(|httproute| {
-                let hns = httproute.metadata.namespace.as_ref().unwrap_or(&def_ns);
-                if let Some(ref parentrefs) = httproute.spec.parent_refs
-                    && parentrefs.iter().all(|parentref| {
+            .filter_map(|httproute| {
+                let hns = httproute.metadata.namespace.as_ref()?;
+                if httproute
+                    .spec
+                    .parent_refs
+                    .as_ref()?
+                    .iter()
+                    .all(|parentref| {
                         does_parentref_listener_match(
                             parentref,
                             listener,
@@ -204,17 +190,18 @@ async fn get_httproutes_for_listener(
                         )
                     })
                 {
-                    true
+                    Some(httproute)
                 } else {
-                    false
+                    None
                 }
             })
             .collect();
         tracing::debug!("{} HTTPRoutes found for the listener", x.len());
         Ok(x)
-    } else {
-        Ok(vec![])
-    }
+    };
+
+    let x = try_closure().await;
+    Some(x)
 }
 
 // Gateway: Add HTTPS protocol listener. Need hostname and port.
@@ -228,25 +215,21 @@ async fn get_httproutes_for_listener(
 // hostname and port are logically impossible to get.
 // Guess hostname from ExternalDNS annotation. Or from http listener.
 #[instrument]
-pub async fn mutate_gateway(gateway: Arc<Gateway>, conf: &Cli) -> Status {
-    match validate_gateway(gateway.clone()).await {
-        Status::Allowed => Status::Allowed,
-        Status::Denied(deny_reason) => match deny_reason {
-            DenyReason::InternalError(ref _r) => Status::Denied(deny_reason),
-            DenyReason::GatewayNoTLSListener => {
-                mutate_gateway_add_listeners(gateway.as_ref(), conf)
-            }
-            DenyReason::GatewayNonRedirectHTTPRouteAttachedToHTTPListener(
-                listener_parted_routes,
-            ) => mutate_gateway_convert_listeners(listener_parted_routes, gateway.as_ref(), conf),
-            _ => unimplemented!(),
-        },
-        _ => unimplemented!(),
+pub async fn mutate_gateway(gateway: Arc<Gateway>, conf: &Cli) -> Option<Result<Status>> {
+    let validate_result = validate_gateway().run(gateway.clone()).await?;
+    match validate_result {
+        Ok(Status::Denied(DenyReason::GatewayNoTLSListener)) => {
+            mutate_gateway_add_listeners(gateway.as_ref(), conf)
+        }
+        Ok(Status::Denied(DenyReason::GatewayNonRedirectHTTPRouteAttachedToHTTPListener(
+            listener_parted_routes,
+        ))) => mutate_gateway_convert_listeners(listener_parted_routes, gateway.as_ref(), conf),
+        _ => Some(validate_result),
     }
 }
 
 #[instrument]
-fn mutate_gateway_add_listeners(gateway: &Gateway, conf: &Cli) -> Status {
+fn mutate_gateway_add_listeners(gateway: &Gateway, conf: &Cli) -> Option<Result<Status>> {
     let port = if gateway.spec.gateway_class_name == "traefik" {
         8443
     } else {
@@ -255,7 +238,6 @@ fn mutate_gateway_add_listeners(gateway: &Gateway, conf: &Cli) -> Status {
 
     let mut target = (*gateway).clone();
 
-    let def_ns = "CLUSTERED".to_string();
     let edns_hostnames = get_external_dns_hostname(gateway).unwrap_or_default();
     let mut hostnames = gateway
         .spec
@@ -265,47 +247,40 @@ fn mutate_gateway_add_listeners(gateway: &Gateway, conf: &Cli) -> Status {
         .collect::<Vec<_>>();
     hostnames.extend(edns_hostnames.iter());
     let hostnames = hostnames.into_iter().unique();
+
     // Running to this reason, means there is no non-redirect httproute attached.
     // How to guarantee?
-    if let Some(gn) = gateway.metadata.name.as_ref()
-        && let Some(gns) = gateway.metadata.namespace.as_ref()
-    {
-        for hostname in hostnames {
-            target.spec.listeners.push(GatewayListeners {
-                allowed_routes: Some(GatewayListenersAllowedRoutes {
-                    kinds: None,
-                    namespaces: Some(GatewayListenersAllowedRoutesNamespaces {
-                        from: Some(GatewayListenersAllowedRoutesNamespacesFrom::Same),
-                        selector: None,
-                    }),
+    let gn = gateway.metadata.name.as_ref()?;
+    let gns = gateway.metadata.namespace.as_ref()?;
+    for hostname in hostnames {
+        target.spec.listeners.push(GatewayListeners {
+            allowed_routes: Some(GatewayListenersAllowedRoutes {
+                kinds: None,
+                namespaces: Some(GatewayListenersAllowedRoutesNamespaces {
+                    from: Some(GatewayListenersAllowedRoutesNamespacesFrom::Same),
+                    selector: None,
                 }),
-                hostname: Some(hostname.clone()),
-                name: format!("{gn}-https"),
-                port,
-                protocol: "HTTPS".to_string(),
-                tls: Some(GatewayListenersTls {
-                    certificate_refs: Some(vec![GatewayListenersTlsCertificateRefs {
-                        group: None,
-                        kind: None,
-                        name: format!("{gn}-https-tls"),
-                        namespace: Some(gns.clone()),
-                    }]),
-                    mode: Some(GatewayListenersTlsMode::Terminate),
-                    options: None,
-                }),
-            });
-        }
-        let ns = gateway.metadata.namespace.as_ref().unwrap_or(&def_ns);
-        let mut annotations = target.metadata.annotations.take().unwrap_or_default();
-        patch_annotations(&mut annotations, ns, conf);
-        target.metadata.annotations = Some(annotations);
-        match patch(gateway, &target) {
-            Ok(p) => Status::Patch(p),
-            Err(e) => Status::Denied(DenyReason::InternalError(e)),
-        }
-    } else {
-        Status::Invalid("Could not get enough information to assemble a HTTPS listener".to_string())
+            }),
+            hostname: Some(hostname.clone()),
+            name: format!("{gn}-https"),
+            port,
+            protocol: "HTTPS".to_string(),
+            tls: Some(GatewayListenersTls {
+                certificate_refs: Some(vec![GatewayListenersTlsCertificateRefs {
+                    group: None,
+                    kind: None,
+                    name: format!("{gn}-https-tls"),
+                    namespace: Some(gns.clone()),
+                }]),
+                mode: Some(GatewayListenersTlsMode::Terminate),
+                options: None,
+            }),
+        });
     }
+    let mut annotations = target.metadata.annotations.take().unwrap_or_default();
+    patch_annotations(&mut annotations, gns, conf);
+    target.metadata.annotations = Some(annotations);
+    Some(patch(gateway, &target).map(Status::Patch))
 }
 
 #[instrument]
@@ -313,7 +288,7 @@ fn mutate_gateway_convert_listeners(
     listener_parted_routes: Vec<(GatewayListeners, Parted<Vec<HTTPRoute>>)>,
     gateway: &Gateway,
     conf: &Cli,
-) -> Status {
+) -> Option<Result<Status>> {
     let port = if gateway.spec.gateway_class_name == "traefik" {
         8443
     } else {
@@ -334,10 +309,9 @@ fn mutate_gateway_convert_listeners(
                     .find(|l| l.name == li.name)
                     .is_some_and(|l| l.hostname.as_ref().is_some_and(|x| !x.is_empty()))
         });
-    if let Some(gn) = gateway.metadata.name.as_ref()
-        && let Some(gns) = gateway.metadata.namespace.as_ref()
-        && inconvertible_listeners.is_empty()
-    {
+    let gn = gateway.metadata.name.as_ref()?;
+    let gns = gateway.metadata.namespace.as_ref()?;
+    if inconvertible_listeners.is_empty() {
         for (li, _) in convertible_listeners {
             target.spec.listeners.iter_mut().for_each(|l| {
                 if l.name == li.name {
@@ -356,14 +330,11 @@ fn mutate_gateway_convert_listeners(
                 }
             });
         }
-        match patch(gateway, &target) {
-            Ok(p) => Status::Patch(p),
-            Err(e) => Status::Denied(DenyReason::InternalError(e)),
-        }
+        Some(patch(gateway, &target).map(Status::Patch))
     } else {
-        Status::Denied(
+        Some(Ok(Status::Denied(
             DenyReason::GatewayNonRedirectHTTPRouteAttachedToHTTPListener(listener_parted_routes),
-        )
+        )))
     }
 }
 

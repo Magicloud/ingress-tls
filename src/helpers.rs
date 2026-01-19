@@ -1,4 +1,4 @@
-use std::{fmt::Display, str::FromStr, sync::Arc};
+use std::{borrow::Cow, fmt::Display, str::FromStr, sync::Arc};
 
 use eyre::{Report, Result, eyre};
 use futures::future::BoxFuture;
@@ -13,14 +13,12 @@ use gateway_api::{
 };
 use itertools::Itertools;
 use json_patch::Patch;
-use just_string::JustString;
 use k8s_openapi::api::{core::v1::Namespace, networking::v1::Ingress};
 use kube::{
     Api, Client,
-    api::{DynamicObject, GroupVersionKind, ListParams, ObjectMeta},
+    api::{DynamicObject, ListParams, ObjectMeta},
     core::admission::AdmissionResponse,
 };
-use mea::once::OnceCell;
 use serde::Serialize;
 use tracing::instrument;
 
@@ -154,7 +152,7 @@ pub async fn get_httproutes(namesapces: &Namespaces<'_>) -> Result<Vec<HTTPRoute
     Ok(ret)
 }
 
-pub async fn filter_namespaces(selectors: &[SelectorByLabel]) -> Result<Vec<String>> {
+pub async fn filter_namespaces(selectors: &[SelectorByLabel<'_, '_>]) -> Result<Vec<String>> {
     let client = Client::try_default().await?;
     let namespaces: Api<Namespace> = Api::all(client);
     let lp = ListParams {
@@ -179,18 +177,19 @@ pub async fn filter_namespaces(selectors: &[SelectorByLabel]) -> Result<Vec<Stri
 #[derive(Debug)]
 pub enum Namespaces<'a> {
     All,
-    Some(Vec<JustString<'a>>),
+    Some(Vec<Cow<'a, str>>),
 }
+
 #[allow(dead_code)]
-pub enum SelectorByLabel {
-    Is(String, String),
-    IsNot(String, String),
-    In(String, Vec<String>),
-    NotIn(String, Vec<String>),
-    Exists(String),
-    DoesNotExist(String),
+pub enum SelectorByLabel<'a, 'b> {
+    Is(Cow<'a, str>, Cow<'b, str>),
+    IsNot(Cow<'a, str>, Cow<'b, str>),
+    In(Cow<'a, str>, Vec<Cow<'b, str>>),
+    NotIn(Cow<'a, str>, Vec<Cow<'b, str>>),
+    Exists(Cow<'a, str>),
+    DoesNotExist(Cow<'a, str>),
 }
-impl Display for SelectorByLabel {
+impl Display for SelectorByLabel<'_, '_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::In(k, v) => f.write_str(&format!("{k} in ({})", v.join(","))),
@@ -202,12 +201,29 @@ impl Display for SelectorByLabel {
         }
     }
 }
-impl From<(String, String)> for SelectorByLabel {
+impl From<(String, String)> for SelectorByLabel<'_, '_> {
     fn from(value: (String, String)) -> Self {
-        Self::Is(value.0, value.1)
+        Self::Is(value.0.into(), value.1.into())
     }
 }
-impl TryFrom<GatewayListenersAllowedRoutesNamespacesSelectorMatchExpressions> for SelectorByLabel {
+impl<'a> From<(&'a String, String)> for SelectorByLabel<'a, '_> {
+    fn from(value: (&'a String, String)) -> Self {
+        Self::Is(value.0.into(), value.1.into())
+    }
+}
+impl<'b> From<(String, &'b String)> for SelectorByLabel<'_, 'b> {
+    fn from(value: (String, &'b String)) -> Self {
+        Self::Is(value.0.into(), value.1.into())
+    }
+}
+impl<'a, 'b> From<(&'a String, &'b String)> for SelectorByLabel<'a, 'b> {
+    fn from(value: (&'a String, &'b String)) -> Self {
+        Self::Is(value.0.into(), value.1.into())
+    }
+}
+impl TryFrom<GatewayListenersAllowedRoutesNamespacesSelectorMatchExpressions>
+    for SelectorByLabel<'_, '_>
+{
     type Error = Report;
 
     fn try_from(
@@ -215,22 +231,28 @@ impl TryFrom<GatewayListenersAllowedRoutesNamespacesSelectorMatchExpressions> fo
     ) -> std::result::Result<Self, Self::Error> {
         let ret = if value.operator == "In" {
             Self::In(
-                value.key,
+                value.key.into(),
                 value
                     .values
-                    .ok_or_else(|| eyre!("`values` should be supplied in `In` operation"))?,
+                    .ok_or_else(|| eyre!("`values` should be supplied in `In` operation"))?
+                    .into_iter()
+                    .map(std::convert::Into::into)
+                    .collect(),
             )
         } else if value.operator == "NotIn" {
             Self::NotIn(
-                value.key,
+                value.key.into(),
                 value
                     .values
-                    .ok_or_else(|| eyre!("`values` should be supplied in `NotIn` operation"))?,
+                    .ok_or_else(|| eyre!("`values` should be supplied in `NotIn` operation"))?
+                    .into_iter()
+                    .map(std::convert::Into::into)
+                    .collect(),
             )
         } else if value.operator == "Exists" {
-            Self::Exists(value.key)
+            Self::Exists(value.key.into())
         } else if value.operator == "DoesNotExist" {
-            Self::DoesNotExist(value.key)
+            Self::DoesNotExist(value.key.into())
         } else {
             return Err(eyre!("Invalid operator {}", value.operator));
         };

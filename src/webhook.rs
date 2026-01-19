@@ -86,8 +86,7 @@ async fn post_validate_(admission_review: Json<Value>) -> Result<AdmissionRespon
             validate_ingress().run(Arc::new(ingress)).await
         } else if dot.is_some_and(|x| x == "Gateway") {
             let gateway = dynamic_object2gateway(obj)?;
-            // validate_gateway().run(Arc::new(gateway)).await
-            todo!()
+            validate_gateway().run(Arc::new(gateway)).await
         } else if dot.is_some_and(|x| x == "HTTPRoute") {
             let httproute = dynamic_object2httproute(obj)?;
             // validate_gateway().run(Arc::new(gateway)).await
@@ -109,10 +108,8 @@ async fn post_mutate(
     admission_review: Json<Value>,
     conf: Data<Arc<Cli>>,
 ) -> Json<AdmissionReview<DynamicObject>> {
-    match post_mutate_(admission_review, conf).await {
-        Ok(ret) => Json(ret.into_review()),
-        Err(_) => todo!(),
-    }
+    (post_mutate_(admission_review, conf).await)
+        .map_or_else(|_| todo!(), |ret| Json(ret.into_review()))
 }
 
 async fn post_mutate_(
@@ -131,8 +128,7 @@ async fn post_mutate_(
             mutate_ingress(Arc::new(ingress), &conf).await
         } else if dynamic_object_type.is_some_and(|x| x == "Gateway") {
             let gateway = dynamic_object2gateway(obj)?;
-            // validate_gateway().run(Arc::new(gateway)).await
-            todo!()
+            mutate_gateway(Arc::new(gateway), &conf).await
         } else if dynamic_object_type.is_some_and(|x| x == "HTTPRoute") {
             let httproute = dynamic_object2httproute(obj)?;
             // validate_gateway().run(Arc::new(gateway)).await
