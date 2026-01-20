@@ -69,7 +69,7 @@ async fn post_validate(admission_review: Json<Value>) -> Json<AdmissionReview<Dy
         .map_or_else(|_| todo!(), |ret| Json(ret.into_review()))
 }
 
-#[instrument]
+#[instrument(skip_all)]
 async fn post_validate_(admission_review: Json<Value>) -> Result<AdmissionResponse> {
     let json = admission_review.into_inner();
     let ar = serde_json::from_value::<AdmissionReview<DynamicObject>>(json)?;
@@ -89,8 +89,7 @@ async fn post_validate_(admission_review: Json<Value>) -> Result<AdmissionRespon
             validate_gateway().run(Arc::new(gateway)).await
         } else if dot.is_some_and(|x| x == "HTTPRoute") {
             let httproute = dynamic_object2httproute(obj)?;
-            // validate_gateway().run(Arc::new(gateway)).await
-            todo!()
+            validate_httproute().run(Arc::new(httproute)).await
         } else {
             unimplemented!()
         };
@@ -131,8 +130,7 @@ async fn post_mutate_(
             mutate_gateway(Arc::new(gateway), &conf).await
         } else if dynamic_object_type.is_some_and(|x| x == "HTTPRoute") {
             let httproute = dynamic_object2httproute(obj)?;
-            // validate_gateway().run(Arc::new(gateway)).await
-            todo!()
+            mutate_httproute(Arc::new(httproute)).await
         } else {
             unimplemented!()
         };

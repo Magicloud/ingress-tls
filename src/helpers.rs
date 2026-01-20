@@ -7,8 +7,10 @@ use gateway_api::{
         Gateway, GatewayListeners, GatewayListenersAllowedRoutesNamespacesSelectorMatchExpressions,
     },
     httproutes::{
-        HTTPRoute, HTTPRouteParentRefs, HTTPRouteRulesFiltersRequestRedirectScheme,
-        HTTPRouteRulesFiltersType,
+        HTTPRoute, HTTPRouteParentRefs, HTTPRouteRules, HTTPRouteRulesFilters,
+        HTTPRouteRulesFiltersRequestRedirect, HTTPRouteRulesFiltersRequestRedirectScheme,
+        HTTPRouteRulesFiltersType, HTTPRouteRulesMatches, HTTPRouteRulesMatchesPath,
+        HTTPRouteRulesMatchesPathType,
     },
 };
 use itertools::Itertools;
@@ -31,6 +33,22 @@ pub const ISSUER: &str = "cert-manager.io/issuer";
 pub const CLUSTER_ISSUER: &str = "cert-manager.io/cluster-issuer";
 pub const ISSUER_KIND: &str = "cert-manager.io/issuer-kind";
 pub const ISSUER_GROUP: &str = "cert-manager.io/issuer-group";
+
+#[allow(unused_macros)]
+macro_rules! debug_cond {
+    ($cond:expr) => {{
+        let result = $cond;
+        if !result {
+            tracing::debug!(
+                "[{}:{}] Condition failed: {}",
+                file!(),
+                line!(),
+                stringify!($cond)
+            );
+        }
+        result
+    }};
+}
 
 // Why this is not a Trait for all objects.
 pub fn dynamic_object2ingress(obj: DynamicObject) -> Result<Ingress> {
@@ -260,59 +278,6 @@ impl TryFrom<GatewayListenersAllowedRoutesNamespacesSelectorMatchExpressions>
     }
 }
 
-// pub async fn any<I, Fut>(i: I) -> bool
-// where
-//     I: IntoIterator<Item = Fut>,
-//     Fut: Future<Output = bool>,
-// {
-//     let mut futures: FuturesUnordered<_> = i.into_iter().collect();
-//     while let Some(result) = futures.next().await {
-//         if result {
-//             return true;
-//         }
-//     }
-//     return false;
-// }
-
-// pub trait AsyncResultExt<T, E> {
-//     async fn and_then_async<U, F, Fut>(self, f: F) -> Result<U, E>
-//     where
-//         F: FnOnce(T) -> Fut,
-//         Fut: Future<Output = Result<U, E>>;
-// }
-// impl<T, E> AsyncResultExt<T, E> for Result<T, E> {
-//     async fn and_then_async<U, F, Fut>(self, f: F) -> Result<U, E>
-//     where
-//         F: FnOnce(T) -> Fut,
-//         Fut: Future<Output = Result<U, E>>,
-//     {
-//         match self {
-//             Ok(value) => f(value).await,
-//             Err(e) => Err(e),
-//         }
-//     }
-// }
-
-pub trait OptionExt<T> {
-    fn unwrap_ref(&self) -> &T;
-}
-impl<T> OptionExt<T> for Option<T> {
-    fn unwrap_ref(&self) -> &T {
-        self.as_ref().unwrap()
-    }
-}
-
-pub trait ResultExt<T> {
-    fn extract(self) -> T;
-}
-impl<T> ResultExt<T> for Result<T, T> {
-    fn extract(self) -> T {
-        match self {
-            Ok(t) | Err(t) => t,
-        }
-    }
-}
-
 pub fn patch<T: Serialize>(src: &T, dst: &T) -> Result<Patch> {
     let s = serde_json::to_value(src)?;
     let d = serde_json::to_value(dst)?;
@@ -368,6 +333,7 @@ pub enum DenyReason {
         Vec<(GatewayListeners, Parted<Vec<HTTPRoute>>)>,
     ),
     HTTPRouteNonRedirectAttachedToHTTPListener(Vec<(HTTPRouteParentRefs, GatewayListenerPair)>),
+    CannotInferenceMutation,
 }
 impl Display for DenyReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -409,6 +375,9 @@ impl Display for DenyReason {
                         )))
                         .join("\n")
                 ))
+            }
+            Self::CannotInferenceMutation => {
+                f.write_str("There is not enough information to make the mutation")
             }
         }
     }
@@ -469,6 +438,11 @@ impl HasMetadata for Gateway {
         &self.metadata
     }
 }
+impl HasMetadata for HTTPRoute {
+    fn get_metadata(&self) -> &ObjectMeta {
+        &self.metadata
+    }
+}
 
 pub fn get_skip(o: &impl HasMetadata) -> Option<&String> {
     let skip = o
@@ -497,47 +471,45 @@ pub fn get_external_dns_hostname(o: &impl HasMetadata) -> Option<Vec<String>> {
     })
 }
 
-pub trait VecExt<T> {
-    // fn push_return(self, value: T) -> Self;
-    // fn append_return(self, other: &mut Vec<T>) -> Self;
-    fn extend_return(self, iter: impl IntoIterator<Item = T>) -> Self;
-}
-impl<T> VecExt<T> for Vec<T> {
-    // fn push_return(mut self, value: T) -> Self {
-    //     self.push(value);
-    //     self
-    // }
-    // fn append_return(mut self, other: &mut Self) -> Self {
-    //     self.append(other);
-    //     self
-    // }
-    fn extend_return(mut self, iter: impl IntoIterator<Item = T>) -> Self {
-        self.extend(iter);
-        self
-    }
-}
-
-#[instrument]
+#[instrument(skip_all)]
 pub fn is_redirect_or_no_rule(httproute: &HTTPRoute) -> bool {
-    if let Some(ref rules) = httproute.spec.rules
-        && rules.len() == 1
-        && let Some(rule) = rules.first()
-        && rule.backend_refs.is_none()
-        && let Some(ref filters) = rule.filters
-        && filters.len() == 1
-        && let Some(filter) = filters.first()
-        && filter.r#type == HTTPRouteRulesFiltersType::RequestRedirect
-        && let Some(ref rr) = filter.request_redirect
-        && rr.scheme == Some(HTTPRouteRulesFiltersRequestRedirectScheme::Https)
-    {
-        // HTTP route with only redirect
-        true
-    } else if httproute.spec.rules.is_none() || httproute.spec.rules == Some(Vec::new()) {
-        // Not for anything yet
-        true
-    } else {
-        false
-    }
+    let try_closure = || {
+        httproute.spec.rules.as_ref().map_or(Some(true), |rules| {
+            if rules.is_empty() {
+                // another kind of no rules.
+                Some(true)
+            } else if rules.len() == 1
+                && rules.first().is_some_and(|x| {
+                    let y = HTTPRouteRules {
+                        matches: Some(vec![HTTPRouteRulesMatches {
+                            path: Some(HTTPRouteRulesMatchesPath {
+                                r#type: Some(HTTPRouteRulesMatchesPathType::PathPrefix),
+                                value: Some("/".to_string()),
+                            }),
+                            ..Default::default()
+                        }]),
+                        filters: Some(vec![HTTPRouteRulesFilters {
+                            r#type: HTTPRouteRulesFiltersType::RequestRedirect,
+                            request_redirect: Some(HTTPRouteRulesFiltersRequestRedirect {
+                                scheme: Some(HTTPRouteRulesFiltersRequestRedirectScheme::Https),
+                                status_code: Some(302),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }]),
+                        ..Default::default()
+                    };
+                    x == &y
+                })
+            {
+                // one and only redirect rule
+                Some(true)
+            } else {
+                None
+            }
+        })
+    };
+    try_closure().unwrap_or_default()
 }
 
 pub fn does_parentref_listener_match(

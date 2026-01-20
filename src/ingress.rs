@@ -8,7 +8,7 @@ use tracing::instrument;
 #[allow(clippy::wildcard_imports)]
 use crate::{cli::Cli, helpers::*};
 
-#[instrument]
+#[instrument(skip_all)]
 pub fn validate_ingress<'a>() -> Checks<'a, Ingress, Option<Result<Status>>> {
     let x: Vec<AsyncClosure<'a, Ingress, Option<Result<Status>>>> = vec![
         // skip
@@ -42,7 +42,7 @@ pub fn validate_ingress<'a>() -> Checks<'a, Ingress, Option<Result<Status>>> {
     x.into()
 }
 
-#[instrument]
+#[instrument(skip_all)]
 pub async fn mutate_ingress(ingress: Arc<Ingress>, conf: &Cli) -> Option<Result<Status>> {
     let validate_result = validate_ingress().run(ingress.clone()).await?;
     if matches!(
@@ -90,7 +90,7 @@ pub async fn mutate_ingress(ingress: Arc<Ingress>, conf: &Cli) -> Option<Result<
     }
 }
 
-#[instrument]
+#[instrument(skip_all)]
 fn patch_annotations(
     annotations: &mut BTreeMap<String, String>,
     ic: &Result<SupportedIngressClass>,

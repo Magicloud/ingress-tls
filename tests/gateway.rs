@@ -41,33 +41,31 @@ fn get_test_namespace() -> String {
     std::env::var("TEST_NAMESPACE").unwrap_or("test".to_string())
 }
 
-fn setup() -> Result<Client> {
+async fn setup() -> Result<Client> {
     RUSTLS_FLAG.get_or_init(|| {
         rustls::crypto::aws_lc_rs::default_provider()
             .install_default()
             .expect("Cannot initialize AWS LC");
         true
     });
-    smol::block_on(async_compat::Compat::new(async {
-        let client = Client::try_default().await?;
-        let namespace = get_test_namespace();
+    let client = Client::try_default().await?;
+    let namespace = get_test_namespace();
 
-        let namespaces: Api<Namespace> = Api::all(client.clone());
-        if namespaces.get_opt(&namespace).await?.is_none() {
-            let namespace = Namespace {
-                metadata: ObjectMeta {
-                    name: Some(namespace.clone()),
-                    ..Default::default()
-                },
+    let namespaces: Api<Namespace> = Api::all(client.clone());
+    if namespaces.get_opt(&namespace).await?.is_none() {
+        let namespace = Namespace {
+            metadata: ObjectMeta {
+                name: Some(namespace.clone()),
                 ..Default::default()
-            };
-            namespaces
-                .create(&PostParams::default(), &namespace)
-                .await?;
-        }
+            },
+            ..Default::default()
+        };
+        namespaces
+            .create(&PostParams::default(), &namespace)
+            .await?;
+    }
 
-        Ok(client)
-    }))
+    Ok(client)
 }
 
 fn run<T, U>(t: T, prep: Vec<U>) -> Result<()>
@@ -85,9 +83,9 @@ where
         + Serialize
         + DeserializeOwned,
 {
-    let client = setup()?;
     let namespace = get_test_namespace();
     let ret: Result<()> = smol::block_on(async_compat::Compat::new(async {
+        let client = setup().await?;
         for u in prep.iter() {
             let us: Api<U> = Api::namespaced(
                 client.clone(),
@@ -224,7 +222,7 @@ fn good_gateway() {
                     matches: Some(vec![HTTPRouteRulesMatches {
                         path: Some(HTTPRouteRulesMatchesPath {
                             r#type: Some(HTTPRouteRulesMatchesPathType::PathPrefix),
-                            value: Some("/".to_string()),
+                            value: Some("/bad_test".to_string()),
                         }),
                         ..Default::default()
                     }]),

@@ -20,7 +20,7 @@ pub struct TLSCertResolver {
     certified_key: Arc<RwLock<Arc<CertifiedKey>>>,
 }
 impl TLSCertResolver {
-    #[instrument]
+    #[instrument(skip_all)]
     pub async fn new(
         cert_file_path: &Path,
         key_file_path: &Path,
@@ -50,7 +50,7 @@ impl TLSCertResolver {
         Ok(self_)
     }
 
-    #[instrument]
+    #[instrument(skip_all)]
     fn watch(
         the_field: &Arc<RwLock<Arc<CertifiedKey>>>,
         cert_file_path: &Path,
@@ -97,8 +97,8 @@ impl TLSCertResolver {
     }
 }
 impl ResolvesServerCert for TLSCertResolver {
-    #[instrument]
-    fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+    #[instrument(skip_all)]
+    fn resolve(&self, _client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         Some(self.certified_key.read_arc_blocking().clone())
     }
 }

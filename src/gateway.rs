@@ -20,7 +20,7 @@ use crate::{cli::Cli, helpers::*};
 // Once we have Gateway ready. Validate HTTPRoute.
 // httproute should be (parent)http -> redirect, (parent)https -> allow.
 // http one must only be redirect. So if no https route, accessing fails.
-#[instrument]
+#[instrument(skip_all)]
 pub fn validate_gateway<'a>() -> Checks<'a, Gateway, Option<Result<Status>>> {
     let x: Vec<AsyncClosure<'a, Gateway, Option<Result<Status>>>> = vec![
         // skip
@@ -75,7 +75,7 @@ pub fn validate_gateway<'a>() -> Checks<'a, Gateway, Option<Result<Status>>> {
 
 type ListenerHTTPRoutes<'a> = (&'a GatewayListeners, Parted<Vec<HTTPRoute>>);
 
-#[instrument]
+#[instrument(skip_all)]
 async fn get_bad_httproutes_for_gateway<'a>(
     gateway: &'a Gateway,
 ) -> Option<Result<Vec<ListenerHTTPRoutes<'a>>>> {
@@ -120,7 +120,7 @@ async fn get_bad_httproutes_for_gateway<'a>(
     Some(ret)
 }
 
-#[instrument]
+#[instrument(skip_all)]
 async fn get_httproutes_for_listener(
     listener: &GatewayListeners,
     gateway_name: &str,
@@ -214,7 +214,7 @@ async fn get_httproutes_for_listener(
 // If there is no redirect http route after all, not so bad.
 // hostname and port are logically impossible to get.
 // Guess hostname from ExternalDNS annotation. Or from http listener.
-#[instrument]
+#[instrument(skip_all)]
 pub async fn mutate_gateway(gateway: Arc<Gateway>, conf: &Cli) -> Option<Result<Status>> {
     let validate_result = validate_gateway().run(gateway.clone()).await?;
     match validate_result {
@@ -223,12 +223,12 @@ pub async fn mutate_gateway(gateway: Arc<Gateway>, conf: &Cli) -> Option<Result<
         }
         Ok(Status::Denied(DenyReason::GatewayNonRedirectHTTPRouteAttachedToHTTPListener(
             listener_parted_routes,
-        ))) => mutate_gateway_convert_listeners(listener_parted_routes, gateway.as_ref(), conf),
+        ))) => mutate_gateway_convert_listeners(listener_parted_routes, gateway.as_ref()),
         _ => Some(validate_result),
     }
 }
 
-#[instrument]
+#[instrument(skip_all)]
 fn mutate_gateway_add_listeners(gateway: &Gateway, conf: &Cli) -> Option<Result<Status>> {
     let port = if gateway.spec.gateway_class_name == "traefik" {
         8443
@@ -278,16 +278,15 @@ fn mutate_gateway_add_listeners(gateway: &Gateway, conf: &Cli) -> Option<Result<
         });
     }
     let mut annotations = target.metadata.annotations.take().unwrap_or_default();
-    patch_annotations(&mut annotations, gns, conf);
+    patch_annotations(&mut annotations, conf);
     target.metadata.annotations = Some(annotations);
     Some(patch(gateway, &target).map(Status::Patch))
 }
 
-#[instrument]
+#[instrument(skip_all)]
 fn mutate_gateway_convert_listeners(
     listener_parted_routes: Vec<(GatewayListeners, Parted<Vec<HTTPRoute>>)>,
     gateway: &Gateway,
-    conf: &Cli,
 ) -> Option<Result<Status>> {
     let port = if gateway.spec.gateway_class_name == "traefik" {
         8443
@@ -338,8 +337,8 @@ fn mutate_gateway_convert_listeners(
     }
 }
 
-#[instrument]
-fn patch_annotations(annotations: &mut BTreeMap<String, String>, ns: &str, conf: &Cli) {
+#[instrument(skip_all)]
+fn patch_annotations(annotations: &mut BTreeMap<String, String>, conf: &Cli) {
     if let Some(ref x) = conf.cma {
         if let Some(ref group) = x.group {
             annotations

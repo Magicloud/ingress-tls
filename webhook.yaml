@@ -67,7 +67,7 @@ spec:
       automountServiceAccountToken: true
       containers:
       - name: ingress-tls
-        image: localhost:5000/ingress-tls:tst34
+        image: localhost:5000/ingress-tls:tst41
         args:
           - --issuer
           - namespaced:step-issuer

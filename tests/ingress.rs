@@ -19,40 +19,38 @@ fn get_test_namespace() -> String {
     std::env::var("TEST_NAMESPACE").unwrap_or("test".to_string())
 }
 
-fn setup() -> Result<Api<Ingress>> {
+async fn setup() -> Result<Api<Ingress>> {
     RUSTLS_FLAG.get_or_init(|| {
         rustls::crypto::aws_lc_rs::default_provider()
             .install_default()
             .expect("Cannot initialize AWS LC");
         true
     });
-    smol::block_on(async_compat::Compat::new(async {
-        let client = Client::try_default().await?;
-        let namespace = get_test_namespace();
+    let client = Client::try_default().await?;
+    let namespace = get_test_namespace();
 
-        let namespaces: Api<Namespace> = Api::all(client.clone());
-        if namespaces.get_opt(&namespace).await?.is_none() {
-            let namespace = Namespace {
-                metadata: ObjectMeta {
-                    name: Some(namespace.clone()),
-                    ..Default::default()
-                },
+    let namespaces: Api<Namespace> = Api::all(client.clone());
+    if namespaces.get_opt(&namespace).await?.is_none() {
+        let namespace = Namespace {
+            metadata: ObjectMeta {
+                name: Some(namespace.clone()),
                 ..Default::default()
-            };
-            namespaces
-                .create(&PostParams::default(), &namespace)
-                .await?;
-        }
+            },
+            ..Default::default()
+        };
+        namespaces
+            .create(&PostParams::default(), &namespace)
+            .await?;
+    }
 
-        let ingresses: Api<Ingress> = Api::namespaced(client, &namespace);
+    let ingresses: Api<Ingress> = Api::namespaced(client, &namespace);
 
-        Ok(ingresses) as Result<_>
-    }))
+    Ok(ingresses) as Result<_>
 }
 
 fn run(ingress: Ingress) -> Result<()> {
-    let ingresses = setup()?;
     let ret: Result<()> = smol::block_on(async_compat::Compat::new(async {
+        let ingresses = setup().await?;
         let x = ingresses.create(&PostParams::default(), &ingress).await;
         let _ = ingresses
             .delete(
