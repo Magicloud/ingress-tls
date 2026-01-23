@@ -1,71 +1,14 @@
-use std::{collections::BTreeMap, sync::OnceLock};
+mod helper;
 
-use eyre::Result;
-use k8s_openapi::api::{
-    core::v1::Namespace,
-    networking::v1::{
-        HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressRule,
-        IngressServiceBackend, IngressSpec, IngressTLS, ServiceBackendPort,
-    },
+use std::collections::BTreeMap;
+
+use k8s_openapi::api::networking::v1::{
+    HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressRule,
+    IngressServiceBackend, IngressSpec, IngressTLS, ServiceBackendPort,
 };
-use kube::{
-    Api, Client,
-    api::{DeleteParams, ObjectMeta, PostParams},
-};
+use kube::api::ObjectMeta;
 
-static RUSTLS_FLAG: OnceLock<bool> = OnceLock::new();
-
-fn get_test_namespace() -> String {
-    std::env::var("TEST_NAMESPACE").unwrap_or("test".to_string())
-}
-
-async fn setup() -> Result<Api<Ingress>> {
-    RUSTLS_FLAG.get_or_init(|| {
-        rustls::crypto::aws_lc_rs::default_provider()
-            .install_default()
-            .expect("Cannot initialize AWS LC");
-        true
-    });
-    let client = Client::try_default().await?;
-    let namespace = get_test_namespace();
-
-    let namespaces: Api<Namespace> = Api::all(client.clone());
-    if namespaces.get_opt(&namespace).await?.is_none() {
-        let namespace = Namespace {
-            metadata: ObjectMeta {
-                name: Some(namespace.clone()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        namespaces
-            .create(&PostParams::default(), &namespace)
-            .await?;
-    }
-
-    let ingresses: Api<Ingress> = Api::namespaced(client, &namespace);
-
-    Ok(ingresses) as Result<_>
-}
-
-fn run(ingress: Ingress) -> Result<()> {
-    let ret: Result<()> = smol::block_on(async_compat::Compat::new(async {
-        let ingresses = setup().await?;
-        let x = ingresses.create(&PostParams::default(), &ingress).await;
-        let _ = ingresses
-            .delete(
-                &ingress.metadata.name.unwrap_or_default(),
-                &DeleteParams::default(),
-            )
-            .await;
-        x?;
-        Ok(())
-    }));
-    if let Err(e) = ret.as_ref() {
-        eprintln!("{e:?}");
-    }
-    ret
-}
+use crate::helper::*;
 
 #[test]
 fn good_ingress() {
@@ -84,7 +27,7 @@ fn good_ingress() {
                 .into_iter()
                 .map(|(x, y)| (x.to_string(), y.to_string())),
             )),
-            name: Some("good-ingress".to_string()),
+            name: Some(gen_name("good")),
             ..ObjectMeta::default()
         },
         spec: Some(IngressSpec {
@@ -115,7 +58,7 @@ fn good_ingress() {
         }),
         status: None,
     };
-    assert!(run(good_ingress).is_ok());
+    assert!(run(good_ingress, vec![] as Vec<Ingress>).is_ok());
 }
 
 #[test]
@@ -130,7 +73,7 @@ fn no_tls_ingress() {
                 .into_iter()
                 .map(|(x, y)| (x.to_string(), y.to_string())),
             )),
-            name: Some("no-tls-ingress".to_string()),
+            name: Some(gen_name("no-tls")),
             ..ObjectMeta::default()
         },
         spec: Some(IngressSpec {
@@ -158,7 +101,7 @@ fn no_tls_ingress() {
         }),
         status: None,
     };
-    assert!(run(no_tls_ingress).is_err())
+    assert!(run(no_tls_ingress, vec![] as Vec<Ingress>).is_err())
 }
 
 #[test]
@@ -176,7 +119,7 @@ fn skip_ingress() {
                 .into_iter()
                 .map(|(x, y)| (x.to_string(), y.to_string())),
             )),
-            name: Some("no-tls-ingress".to_string()),
+            name: Some(gen_name("skip")),
             ..ObjectMeta::default()
         },
         spec: Some(IngressSpec {
@@ -204,5 +147,5 @@ fn skip_ingress() {
         }),
         status: None,
     };
-    assert!(run(skip_ingress).is_ok())
+    assert!(run(skip_ingress, vec![] as Vec<Ingress>).is_ok())
 }

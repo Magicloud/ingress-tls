@@ -67,7 +67,7 @@ spec:
       automountServiceAccountToken: true
       containers:
       - name: ingress-tls
-        image: localhost:5000/ingress-tls:tst41
+        image: localhost:5000/ingress-tls:tst42
         args:
           - --issuer
           - namespaced:step-issuer
@@ -77,10 +77,12 @@ spec:
           - certmanager.step.sm
           - -t
           - test/https-redirect
+          - -f
+          - /tls
           - -c
-          - /tls/tls.crt
+          - tls.crt
           - -k
-          - /tls/tls.key
+          - tls.key
         ports:
         - containerPort: 443
           name: ingress-tls

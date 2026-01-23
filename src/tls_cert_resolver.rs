@@ -22,27 +22,28 @@ pub struct TLSCertResolver {
 impl TLSCertResolver {
     #[instrument(skip_all)]
     pub async fn new(
-        cert_file_path: &Path,
-        key_file_path: &Path,
+        tls_folder: &Path,
+        cert_file_name: &str,
+        key_file_name: &str,
         provider: &CryptoProvider,
     ) -> Result<Self> {
+        let cert_path = tls_folder.join(cert_file_name);
+        let key_path = tls_folder.join(key_file_name);
         let mut self_ = Self {
             inotify_thread: None,
             certified_key: Arc::new(RwLock::new(Arc::new(CertifiedKey::from_der(
-                CertificateDer::pem_file_iter(cert_file_path)?
+                CertificateDer::pem_file_iter(&cert_path)?
                     .flatten()
                     .collect(),
-                PrivateKeyDer::from_pem_file(key_file_path)?,
+                PrivateKeyDer::from_pem_file(&key_path)?,
                 provider,
             )?))),
         };
         let the_field = self_.certified_key.clone();
-        // /tls/ca.crt => /tls/..data/ca.crt => /tls/..DATE/ca.crt
-        let cert_fp = cert_file_path.to_path_buf();
-        let key_fp = key_file_path.to_path_buf();
         let p = provider.clone();
+        let t = tls_folder.to_path_buf();
         let inotify_thread = Some(unblock(move || {
-            if let Err(e) = Self::watch(&the_field, &cert_fp, &key_fp, &p) {
+            if let Err(e) = Self::watch(&the_field, &t, &cert_path, &key_path, &p) {
                 tracing::error!("{e:?}");
             }
         }));
@@ -53,45 +54,35 @@ impl TLSCertResolver {
     #[instrument(skip_all)]
     fn watch(
         the_field: &Arc<RwLock<Arc<CertifiedKey>>>,
+        tls_folder: &Path,
         cert_file_path: &Path,
         key_file_path: &Path,
         provider: &CryptoProvider,
     ) -> Result<()> {
         let mut inotify = Inotify::init()?;
         inotify.watches().add(
-            cert_file_path,
-            WatchMask::DONT_FOLLOW | WatchMask::CREATE | WatchMask::MODIFY,
-        )?;
-        inotify.watches().add(
-            key_file_path,
-            WatchMask::DONT_FOLLOW | WatchMask::CREATE | WatchMask::MODIFY,
+            tls_folder,
+            WatchMask::DELETE | WatchMask::CREATE | WatchMask::MOVED_TO,
         )?;
 
-        let mut both_flags = (false, false);
         let mut buffer = [0; 4096];
         loop {
             let events = inotify.read_events_blocking(&mut buffer)?;
             for event in events {
-                if let Some(name) = event.name {
-                    if cert_file_path.as_os_str() == name {
-                        both_flags.0 = true;
-                    } else if key_file_path.as_os_str() == name {
-                        both_flags.1 = true;
-                    }
+                if let Some(name) = event.name
+                    && name == "..data"
+                {
+                    tracing::info!("TLS cert renewed");
+                    *the_field.write_arc_blocking() = CertifiedKey::from_der(
+                        CertificateDer::pem_file_iter(cert_file_path)?
+                            .flatten()
+                            .collect(),
+                        PrivateKeyDer::from_pem_file(key_file_path)?,
+                        provider,
+                    )?
+                    .into();
+                    break;
                 }
-            }
-
-            if both_flags.0 && both_flags.1 {
-                tracing::info!("TLS cert renewed");
-                *the_field.write_arc_blocking() = CertifiedKey::from_der(
-                    CertificateDer::pem_file_iter(cert_file_path)?
-                        .flatten()
-                        .collect(),
-                    PrivateKeyDer::from_pem_file(key_file_path)?,
-                    provider,
-                )?
-                .into();
-                both_flags = (false, false);
             }
         }
     }

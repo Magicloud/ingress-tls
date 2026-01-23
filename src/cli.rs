@@ -30,12 +30,15 @@ pub struct Cli {
     /// namespace with Ingress.
     #[arg(short, long)]
     pub traefik_ingress_redirect_resource_name: Option<String>,
+    /// Webhook service TLS certificate files folder
+    #[arg(short('f'), long)]
+    pub tls_folder: PathBuf,
     /// Webhook service TLS certificate file path
     #[arg(short('c'), long)]
-    pub tls_certificate_file_path: PathBuf,
+    pub tls_certificate_file_name: String,
     /// Webhook service TLS private key file path
     #[arg(short('k'), long)]
-    pub tls_private_key_file_path: PathBuf,
+    pub tls_private_key_file_name: String,
 }
 
 #[derive(Debug, Clone, Args)]

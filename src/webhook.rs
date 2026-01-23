@@ -25,8 +25,9 @@ use crate::{
 impl Cli {
     pub async fn start(self) -> Result<()> {
         let cert_solver = TLSCertResolver::new(
-            &self.tls_certificate_file_path,
-            &self.tls_private_key_file_path,
+            &self.tls_folder,
+            &self.tls_certificate_file_name,
+            &self.tls_private_key_file_name,
             rustls::crypto::CryptoProvider::get_default().expect("Provider did not initialize"),
         )
         .await?;

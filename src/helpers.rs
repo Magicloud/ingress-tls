@@ -348,7 +348,7 @@ impl Display for DenyReason {
             }
             Self::IngressNoTLS => f.write_str("The Ingress does not contain a TLS configuration."),
             Self::GatewayNoTLSListener => {
-                f.write_str("The Gateway doe s not contain a TLS configuration.")
+                f.write_str("The Gateway does not contain a TLS configuration.")
             }
             Self::GatewayNonRedirectHTTPRouteAttachedToHTTPListener(listener_routes) => {
                 let httproutes = listener_routes

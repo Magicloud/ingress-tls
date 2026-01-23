@@ -1,6 +1,7 @@
-use std::{collections::BTreeMap, sync::OnceLock};
+mod helper;
 
-use eyre::Result;
+use std::collections::BTreeMap;
+
 use gateway_api::{
     gateways::{
         Gateway, GatewayListeners, GatewayListenersTls, GatewayListenersTlsCertificateRefs,
@@ -14,119 +15,9 @@ use gateway_api::{
         HTTPRouteSpec,
     },
 };
-use k8s_openapi::{NamespaceResourceScope, api::core::v1::Namespace};
-use kube::{
-    Api, Client, Resource,
-    api::{DeleteParams, ObjectMeta, PostParams},
-};
-use serde::{Serialize, de::DeserializeOwned};
+use kube::api::ObjectMeta;
 
-pub trait HasMetadata {
-    fn get_metadata(&self) -> &ObjectMeta;
-}
-impl HasMetadata for Gateway {
-    fn get_metadata(&self) -> &ObjectMeta {
-        &self.metadata
-    }
-}
-impl HasMetadata for HTTPRoute {
-    fn get_metadata(&self) -> &ObjectMeta {
-        &self.metadata
-    }
-}
-
-static RUSTLS_FLAG: OnceLock<bool> = OnceLock::new();
-
-fn get_test_namespace() -> String {
-    std::env::var("TEST_NAMESPACE").unwrap_or("test".to_string())
-}
-
-async fn setup() -> Result<Client> {
-    RUSTLS_FLAG.get_or_init(|| {
-        rustls::crypto::aws_lc_rs::default_provider()
-            .install_default()
-            .expect("Cannot initialize AWS LC");
-        true
-    });
-    let client = Client::try_default().await?;
-    let namespace = get_test_namespace();
-
-    let namespaces: Api<Namespace> = Api::all(client.clone());
-    if namespaces.get_opt(&namespace).await?.is_none() {
-        let namespace = Namespace {
-            metadata: ObjectMeta {
-                name: Some(namespace.clone()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        namespaces
-            .create(&PostParams::default(), &namespace)
-            .await?;
-    }
-
-    Ok(client)
-}
-
-fn run<T, U>(t: T, prep: Vec<U>) -> Result<()>
-where
-    T: HasMetadata
-        + Resource<Scope = NamespaceResourceScope, DynamicType: Default>
-        + Clone
-        + std::fmt::Debug
-        + Serialize
-        + DeserializeOwned,
-    U: HasMetadata
-        + Resource<Scope = NamespaceResourceScope, DynamicType: Default>
-        + Clone
-        + std::fmt::Debug
-        + Serialize
-        + DeserializeOwned,
-{
-    let namespace = get_test_namespace();
-    let ret: Result<()> = smol::block_on(async_compat::Compat::new(async {
-        let client = setup().await?;
-        for u in prep.iter() {
-            let us: Api<U> = Api::namespaced(
-                client.clone(),
-                u.get_metadata().namespace.as_ref().unwrap_or(&namespace),
-            );
-            us.create(&PostParams::default(), u).await?;
-        }
-
-        let ts: Api<T> = Api::namespaced(
-            client.clone(),
-            t.get_metadata().namespace.as_ref().unwrap_or(&namespace),
-        );
-        let x = ts.create(&PostParams::default(), &t).await;
-        let _ = ts
-            .delete(
-                t.get_metadata().name.as_ref().unwrap_or(&String::new()),
-                &DeleteParams::default(),
-            )
-            .await;
-
-        for u in prep {
-            let us: Api<U> = Api::namespaced(
-                client.clone(),
-                u.get_metadata().namespace.as_ref().unwrap_or(&namespace),
-            );
-            let _ = us
-                .delete(
-                    u.get_metadata().name.as_ref().unwrap_or(&String::new()),
-                    &DeleteParams::default(),
-                )
-                .await;
-        }
-
-        x?;
-        Ok(())
-    }));
-    if let Err(e) = ret.as_ref() {
-        eprintln!("{e:?}");
-    }
-    ret
-}
+use crate::helper::*;
 
 #[test]
 fn good_gateway() {
@@ -145,7 +36,7 @@ fn good_gateway() {
                 .into_iter()
                 .map(|(x, y)| (x.to_string(), y.to_string())),
             )),
-            name: Some("good-gateway".to_string()),
+            name: Some(gen_name("good")),
             ..Default::default()
         },
         spec: GatewaySpec {
@@ -180,13 +71,13 @@ fn good_gateway() {
     let prep = vec![
         HTTPRoute {
             metadata: ObjectMeta {
-                name: Some("good-http-httproute-good-gateway".to_string()),
+                name: Some(gen_name("good-http")),
                 ..Default::default()
             },
             spec: HTTPRouteSpec {
                 parent_refs: Some(vec![HTTPRouteParentRefs {
                     kind: Some("Gateway".to_string()),
-                    name: "good-gateway".to_string(),
+                    name: good_gateway.metadata.name.clone().unwrap(),
                     section_name: Some("http".to_string()),
                     ..Default::default()
                 }]),
@@ -207,14 +98,14 @@ fn good_gateway() {
         },
         HTTPRoute {
             metadata: ObjectMeta {
-                name: Some("outside-bad-http-httproute-good-gateway".to_string()),
+                name: Some(gen_name("outside-bad")),
                 namespace: Some("default".to_string()),
                 ..Default::default()
             },
             spec: HTTPRouteSpec {
                 parent_refs: Some(vec![HTTPRouteParentRefs {
                     kind: Some("Gateway".to_string()),
-                    name: "good-gateway".to_string(),
+                    name: good_gateway.metadata.name.clone().unwrap(),
                     section_name: Some("http".to_string()),
                     ..Default::default()
                 }]),
@@ -240,13 +131,13 @@ fn good_gateway() {
         },
         HTTPRoute {
             metadata: ObjectMeta {
-                name: Some("good-https-httproute-good-gateway".to_string()),
+                name: Some(gen_name("good-https")),
                 ..Default::default()
             },
             spec: HTTPRouteSpec {
                 parent_refs: Some(vec![HTTPRouteParentRefs {
                     kind: Some("Gateway".to_string()),
-                    name: "good-gateway".to_string(),
+                    name: good_gateway.metadata.name.clone().unwrap(),
                     section_name: Some("https".to_string()),
                     ..Default::default()
                 }]),
@@ -290,7 +181,7 @@ fn skip_gateway() {
                 .into_iter()
                 .map(|(x, y)| (x.to_string(), y.to_string())),
             )),
-            name: Some("good-gateway".to_string()),
+            name: Some(gen_name("skip")),
             ..Default::default()
         },
         spec: GatewaySpec {
@@ -321,7 +212,7 @@ fn no_tls_gateway() {
                 .into_iter()
                 .map(|(x, y)| (x.to_string(), y.to_string())),
             )),
-            name: Some("good-gateway".to_string()),
+            name: Some(gen_name("no-tls")),
             ..Default::default()
         },
         spec: GatewaySpec {
@@ -356,7 +247,7 @@ fn bad_httproute_gateway() {
                 .into_iter()
                 .map(|(x, y)| (x.to_string(), y.to_string())),
             )),
-            name: Some("bad-httproute-gateway".to_string()),
+            name: Some(gen_name("bad-httproute")),
             ..Default::default()
         },
         spec: GatewaySpec {
@@ -391,13 +282,13 @@ fn bad_httproute_gateway() {
     let prep = vec![
         HTTPRoute {
             metadata: ObjectMeta {
-                name: Some("good-http-httproute-bad-httproute-gateway".to_string()),
+                name: Some(gen_name("good-http")),
                 ..Default::default()
             },
             spec: HTTPRouteSpec {
                 parent_refs: Some(vec![HTTPRouteParentRefs {
                     kind: Some("Gateway".to_string()),
-                    name: "bad-httproute-gateway".to_string(),
+                    name: bad_httproute_gateway.metadata.name.clone().unwrap(),
                     section_name: Some("http".to_string()),
                     ..Default::default()
                 }]),
@@ -418,13 +309,13 @@ fn bad_httproute_gateway() {
         },
         HTTPRoute {
             metadata: ObjectMeta {
-                name: Some("bad-http-httproute-bad-httproute-gateway".to_string()),
+                name: Some(gen_name("bad-http")),
                 ..Default::default()
             },
             spec: HTTPRouteSpec {
                 parent_refs: Some(vec![HTTPRouteParentRefs {
                     kind: Some("Gateway".to_string()),
-                    name: "bad-httproute-gateway".to_string(),
+                    name: bad_httproute_gateway.metadata.name.clone().unwrap(),
                     section_name: Some("http".to_string()),
                     ..Default::default()
                 }]),
@@ -450,13 +341,13 @@ fn bad_httproute_gateway() {
         },
         HTTPRoute {
             metadata: ObjectMeta {
-                name: Some("good-https-httproute-bad-httproute-gateway".to_string()),
+                name: Some(gen_name("good-https")),
                 ..Default::default()
             },
             spec: HTTPRouteSpec {
                 parent_refs: Some(vec![HTTPRouteParentRefs {
                     kind: Some("Gateway".to_string()),
-                    name: "bad-httproute-gateway".to_string(),
+                    name: bad_httproute_gateway.metadata.name.clone().unwrap(),
                     section_name: Some("https".to_string()),
                     ..Default::default()
                 }]),

@@ -1,6 +1,6 @@
 [package]
 name = "ingress-tls"
-version = "2026.1.18"
+version = "2026.1.27"
 edition = "2024"
 description = "Kubernetes AdmissionControl webhook to validate or mutate Ingress/Gateway to ensure it contains TLS setup"
 license = "None"
@@ -48,3 +48,4 @@ inotify = { version = "*" }
 mea = { version = "*" }
 itertools = { version = "*" }
 ouroboros = { version = "*" }
+random_str = { version = "*" }
