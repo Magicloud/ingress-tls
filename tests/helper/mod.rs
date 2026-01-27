@@ -89,6 +89,11 @@ where
                 u.get_metadata().namespace.as_ref().unwrap_or(&namespace),
             );
             us.create(&PostParams::default(), u).await?;
+            eprintln!(
+                "Created {:?}/{:?}",
+                u.get_metadata().namespace,
+                u.get_metadata().name
+            );
         }
 
         let ts: Api<T> = Api::namespaced(
@@ -96,6 +101,11 @@ where
             t.get_metadata().namespace.as_ref().unwrap_or(&namespace),
         );
         let x = ts.create(&PostParams::default(), &t).await;
+        eprintln!(
+            "Created {:?}/{:?}",
+            t.get_metadata().namespace,
+            t.get_metadata().name
+        );
         let _ = ts
             .delete(
                 t.get_metadata().name.as_ref().unwrap_or(&String::new()),

@@ -285,6 +285,7 @@ pub fn patch<T: Serialize>(src: &T, dst: &T) -> Result<Patch> {
     Ok(p)
 }
 
+#[derive(Debug)]
 pub enum Status {
     MoveOn,
     Allowed,
@@ -325,6 +326,7 @@ impl From<StatusAdmissionResponse> for AdmissionResponse {
     }
 }
 
+#[derive(Debug)]
 pub enum DenyReason {
     InternalError(Report),
     IngressNoTLS,

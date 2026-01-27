@@ -67,7 +67,7 @@ spec:
       automountServiceAccountToken: true
       containers:
       - name: ingress-tls
-        image: localhost:5000/ingress-tls:tst42
+        image: localhost:5000/ingress-tls:tst43
         args:
           - --issuer
           - namespaced:step-issuer
@@ -134,7 +134,7 @@ webhooks:
   - apiGroups:   ["*"]
     apiVersions: ["*"]
     operations:  ["CREATE", "UPDATE"]
-    resources:   ["ingresses", "gateways"] #, "httproutes"]
+    resources:   ["ingresses", "gateways", "httproutes"]
     scope:       "*"
   clientConfig:
     service:

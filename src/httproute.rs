@@ -225,6 +225,7 @@ async fn filter_gateway_of_http_listener_attached_to(
 }
 
 #[self_referencing]
+#[derive(Debug)]
 pub struct GatewayListenerPair {
     pub gateway: Gateway,
     #[borrows(gateway)]
