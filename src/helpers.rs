@@ -306,21 +306,43 @@ impl From<Option<Result<Self>>> for Status {
     }
 }
 
-pub struct StatusAdmissionResponse(Status, AdmissionResponse);
-impl From<(Status, AdmissionResponse)> for StatusAdmissionResponse {
-    fn from(value: (Status, AdmissionResponse)) -> Self {
-        Self(value.0, value.1)
+pub struct StatusAdmissionResponse(Status, AdmissionResponse, Option<ObjectMeta>);
+impl From<(Status, AdmissionResponse, Option<ObjectMeta>)> for StatusAdmissionResponse {
+    fn from(value: (Status, AdmissionResponse, Option<ObjectMeta>)) -> Self {
+        Self(value.0, value.1, value.2)
     }
 }
 impl From<StatusAdmissionResponse> for AdmissionResponse {
-    fn from(StatusAdmissionResponse(s, mut a): StatusAdmissionResponse) -> Self {
+    fn from(StatusAdmissionResponse(s, mut a, m): StatusAdmissionResponse) -> Self {
         match s {
             Status::Allowed | Status::MoveOn => {
                 a.allowed = true;
                 a
             }
-            Status::Denied(msg) => a.deny(msg.to_string()),
-            Status::Invalid(msg) => a.deny(msg),
+            Status::Denied(msg) => {
+                let id = m
+                    .map(|m| {
+                        format!(
+                            "{}/{}",
+                            m.namespace.unwrap_or_default(),
+                            m.name.unwrap_or_default()
+                        )
+                    })
+                    .unwrap_or_default();
+                a.deny(format!("{id}: {msg}"))
+            }
+            Status::Invalid(msg) => {
+                let id = m
+                    .map(|m| {
+                        format!(
+                            "{}/{}",
+                            m.namespace.unwrap_or_default(),
+                            m.name.unwrap_or_default()
+                        )
+                    })
+                    .unwrap_or_default();
+                a.deny(format!("{id}: {msg}"))
+            }
             Status::Patch(_) => unimplemented!(),
         }
     }
@@ -339,9 +361,6 @@ pub enum DenyReason {
 }
 impl Display for DenyReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // let def_ns = DEFAULT_NAMESPACE
-        //     .get()
-        //     .expect("Cannot get DEFAULT_NAMESPACE");
         let def_ns = "CLUSTERED".to_string();
         let empty_string = String::new();
         match self {
