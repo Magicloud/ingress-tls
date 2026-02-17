@@ -80,7 +80,7 @@ async fn post_validate_(admission_review: Json<Value>) -> Result<AdmissionRespon
         <AdmissionReview<DynamicObject> as TryInto<AdmissionRequest<DynamicObject>>>::try_into(ar)?;
     let ret = AdmissionResponse::from(&req);
     tracing::debug!("Processing {:?}", req.kind);
-    let final_result = if let Some(obj) = req.object {
+    let final_result = if let Some(obj) = req.object.clone() {
         let dot = obj.types.as_ref().map(|t| &t.kind);
         let ret = if dot.is_some_and(|x| x == "Ingress") {
             let ingress = dynamic_object2ingress(obj)?;
@@ -100,7 +100,7 @@ async fn post_validate_(admission_review: Json<Value>) -> Result<AdmissionRespon
     };
     tracing::debug!("Resulting {final_result:?}");
 
-    let x: StatusAdmissionResponse = (final_result, ret).into();
+    let x: StatusAdmissionResponse = (final_result, ret, req.object.map(|o| o.metadata)).into();
     Ok(x.into())
 }
 
@@ -121,7 +121,7 @@ async fn post_mutate_(
     let ar = serde_json::from_value::<AdmissionReview<DynamicObject>>(json)?;
     let req = ar.try_into()?;
     let ret = AdmissionResponse::from(&req);
-    let final_result = if let Some(obj) = req.object {
+    let final_result = if let Some(obj) = req.object.clone() {
         tracing::debug!("Processing {:?}/{:?}", req.kind, obj.types);
         let dynamic_object_type = obj.types.as_ref().map(|t| &t.kind);
         let ret = if dynamic_object_type.is_some_and(|x| x == "Ingress") {
@@ -141,6 +141,6 @@ async fn post_mutate_(
         Status::Invalid("No object passed".to_string())
     };
 
-    let x: StatusAdmissionResponse = (final_result, ret).into();
+    let x: StatusAdmissionResponse = (final_result, ret, req.object.map(|o| o.metadata)).into();
     Ok(x.into())
 }
