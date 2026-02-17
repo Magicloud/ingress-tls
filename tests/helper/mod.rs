@@ -10,7 +10,7 @@ use kube::{
     Api, Client, Resource,
     api::{DeleteParams, ObjectMeta, PostParams},
 };
-use random_str::get_string;
+use random_str::random::{CharBuilder, RandomStringBuilder};
 use serde::{Serialize, de::DeserializeOwned};
 
 pub trait HasMetadata {
@@ -138,6 +138,10 @@ where
 pub fn gen_name(prefix: &str) -> String {
     format!(
         "ingress-tls-{prefix}-{}",
-        get_string(7, true, false, false, false)
+        RandomStringBuilder::new()
+            .with_length(7)
+            .with_lowercase()
+            .build()
+            .unwrap_or_default()
     )
 }

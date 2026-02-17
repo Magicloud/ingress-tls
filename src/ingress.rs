@@ -139,6 +139,6 @@ fn patch_annotations(
             }
         }
     } else {
-        tracing::warn!("{ic:?}");
+        tracing::warn!(target: "patch-annotation-error", message = format!("{ic:?}"));
     }
 }
