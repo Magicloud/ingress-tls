@@ -298,7 +298,7 @@ impl From<Option<Result<Self>>> for Status {
         match value {
             Some(Ok(s)) => s,
             Some(Err(e)) => {
-                tracing::warn!("{e:?}");
+                tracing::warn!(target: "internal-error", message = format!("{e:?}"));
                 Self::Denied(DenyReason::InternalError(e))
             }
             None => Self::Invalid("Input does not contain enough information".to_string()),
@@ -306,10 +306,10 @@ impl From<Option<Result<Self>>> for Status {
     }
 }
 
-pub struct StatusAdmissionResponse(Status, AdmissionResponse, Option<ObjectMeta>);
-impl From<(Status, AdmissionResponse, Option<ObjectMeta>)> for StatusAdmissionResponse {
-    fn from(value: (Status, AdmissionResponse, Option<ObjectMeta>)) -> Self {
-        Self(value.0, value.1, value.2)
+pub struct StatusAdmissionResponse(Status, AdmissionResponse, (String, String));
+impl From<(Status, AdmissionResponse, (&String, &String))> for StatusAdmissionResponse {
+    fn from(value: (Status, AdmissionResponse, (&String, &String))) -> Self {
+        Self(value.0, value.1, (value.2.0.clone(), value.2.1.clone()))
     }
 }
 impl From<StatusAdmissionResponse> for AdmissionResponse {
@@ -319,30 +319,8 @@ impl From<StatusAdmissionResponse> for AdmissionResponse {
                 a.allowed = true;
                 a
             }
-            Status::Denied(msg) => {
-                let id = m
-                    .map(|m| {
-                        format!(
-                            "{}/{}",
-                            m.namespace.unwrap_or_default(),
-                            m.name.unwrap_or_default()
-                        )
-                    })
-                    .unwrap_or_default();
-                a.deny(format!("{id}: {msg}"))
-            }
-            Status::Invalid(msg) => {
-                let id = m
-                    .map(|m| {
-                        format!(
-                            "{}/{}",
-                            m.namespace.unwrap_or_default(),
-                            m.name.unwrap_or_default()
-                        )
-                    })
-                    .unwrap_or_default();
-                a.deny(format!("{id}: {msg}"))
-            }
+            Status::Denied(msg) => a.deny(format!("{}/{}: {msg}", m.0, m.1)),
+            Status::Invalid(msg) => a.deny(format!("{}/{}: {msg}", m.0, m.1)),
             Status::Patch(_) => unimplemented!(),
         }
     }

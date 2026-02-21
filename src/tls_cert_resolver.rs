@@ -44,7 +44,7 @@ impl TLSCertResolver {
         let t = tls_folder.to_path_buf();
         let inotify_thread = Some(unblock(move || {
             if let Err(e) = Self::watch(&the_field, &t, &cert_path, &key_path, &p) {
-                tracing::error!("{e:?}");
+                tracing::error!(target: "tls-cert-hot-reload", message = format!("{e:?}"));
             }
         }));
         self_.inotify_thread = inotify_thread;
@@ -72,7 +72,7 @@ impl TLSCertResolver {
                 if let Some(name) = event.name
                     && name == "..data"
                 {
-                    tracing::info!("TLS cert renewed");
+                    tracing::info!(target: "tls-cert-hot-reload", message = "TLS cert renewed");
                     *the_field.write_arc_blocking() = CertifiedKey::from_der(
                         CertificateDer::pem_file_iter(cert_file_path)?
                             .flatten()
